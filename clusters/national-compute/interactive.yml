@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: interactive-gpu
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: shell
+          # Replace this with the AMD/ROCm-compatible image you want to use.
+          image: rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
+          command: ["/bin/bash", "-lc", "sleep infinity"]
+          stdin: true
+          tty: true
+          resources:
+            requests:
+              amd.com/gpu: 8
+            limits:
+              amd.com/gpu: 8
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: shared
+              mountPath: /mnt/shared
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+        - name: shared
+          hostPath:
+            path: /mnt/shared
+            type: Directory
