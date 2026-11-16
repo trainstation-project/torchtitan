@@ -1,0 +1,21 @@
+# BPB of the canonical TriviaQA answer, 5-shot, in lm-eval's triviaqa prompt.
+# Exact match needs generation and runs at milestones.
+# The target carries its own leading space (see gold_bpb_utils.py).
+task: triviaqa_gold_bpb
+dataset_path: mandarjoshi/trivia_qa
+dataset_name: rc.nocontext
+output_type: loglikelihood
+training_split: train
+fewshot_split: train
+validation_split: validation
+doc_to_text: "Question: {{question}}?\nAnswer:"
+doc_to_target: " {{answer.value}}"
+target_delimiter: ""
+process_results: !function gold_bpb_utils.triviaqa_results
+metric_list:
+  - metric: bits_per_byte
+    aggregation: bits_per_byte
+    higher_is_better: false
+num_fewshot: 5
+metadata:
+  version: 0

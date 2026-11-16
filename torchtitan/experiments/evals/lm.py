@@ -39,6 +39,109 @@ from torchtitan.protocols.model import BaseModel
 # _LOGITS_CHUNK_ROWS x vocab (about 2.5 GB for a 150k vocabulary).
 _LOGITS_CHUNK_ROWS = 4096
 
+# One scored sequence: (input tokens, target tokens). The targets are the
+# tokens predicted at the last len(targets) input positions.
+Sequence = tuple[list[int], list[int]]
+
+
+def rolling_windows(
+    tokens: list[int], *, prefix_token: int, max_length: int
+) -> list[tuple[list[int], list[int]]]:
+    """lm-eval's rolling windows over a document: (context, continuation) pairs.
+
+    The continuations are disjoint and cover every token once. The first
+    window is conditioned on ``prefix_token`` (BOS), each later one on the
+    tokens before it, up to ``max_length`` tokens in total.
+    """
+    return list(
+        map(
+            make_disjoint_window,
+            get_rolling_token_windows(
+                token_list=tokens,
+                prefix_token=prefix_token,
+                max_seq_len=max_length,
+                context_len=1,
+            ),
+        )
+    )
+
+
+def to_sequence(
+    context: list[int], continuation: list[int], *, max_length: int
+) -> Sequence:
+    """(input tokens, targets) for one request, left-truncated to ``max_length``."""
+    # An empty context would shift every target onto the wrong logit row.
+    if not context:
+        raise ValueError("The context must hold at least one token.")
+    if len(continuation) > max_length:
+        raise ValueError(
+            f"Continuation of {len(continuation)} tokens exceeds "
+            f"max_context_length ({max_length})."
+        )
+    # The last token is only ever a target.
+    tokens = (context + continuation)[-(max_length + 1) :]
+    return tokens[:-1], continuation
+
+
+def pack_sequences(
+    order: list[int],
+    sequences: list[Sequence],
+    *,
+    num_tokens_per_batch: int,
+    max_num_documents: int | None = None,
+) -> list[list[int]]:
+    """Group sequence indices, taken in ``order``, into buffers that fit."""
+    batches: list[list[int]] = []
+    current: list[int] = []
+    used = 0
+    for index in order:
+        length = len(sequences[index][0])
+        full = used + length > num_tokens_per_batch or (
+            max_num_documents is not None and len(current) == max_num_documents
+        )
+        if current and full:
+            batches.append(current)
+            current, used = [], 0
+        current.append(index)
+        used += length
+    if current:
+        batches.append(current)
+    return batches
+
+
+def build_buffer(
+    sequences: list[Sequence], *, size: int, max_context_length: int
+) -> tuple[dict[str, torch.Tensor], list[int], list[int]]:
+    """One packed buffer in the training collator's layout.
+
+    Returns the batch (``labels`` all ignored), the flat indices of the rows
+    whose logits predict a target, and the target token ids.
+    """
+    input_ids = torch.zeros(size, dtype=torch.int64)
+    positions = torch.zeros(size, dtype=torch.int64)
+    padding_mask = torch.ones(size, dtype=torch.bool)
+    target_rows: list[int] = []
+    target_ids: list[int] = []
+    start = 0
+    for inputs, targets in sequences:
+        end = start + len(inputs)
+        input_ids[start:end] = torch.tensor(inputs)
+        positions[start:end] = torch.arange(len(inputs))
+        padding_mask[start:end] = False
+        target_rows.extend(range(end - len(targets), end))
+        target_ids.extend(targets)
+        start = end
+    if start < size:
+        # Same padding layout as TextCollator.
+        positions[start:] = torch.arange(size - start) % max_context_length
+    batch = {
+        "input": input_ids,
+        "labels": torch.full((size,), IGNORE_INDEX, dtype=torch.int64),
+        "positions": positions,
+        "padding_mask": padding_mask,
+    }
+    return batch, target_rows, target_ids
+
 
 class TrainstationLM(TemplateLM):
     """Log-likelihood scoring of lm-eval requests with a torchtitan model.
@@ -128,14 +231,8 @@ class TrainstationLM(TemplateLM):
         owners: list[int] = []
         for index, (string,) in enumerate(req.args for req in requests):
             tokens = self.tok_encode(string, add_special_tokens=False)
-            for context, continuation in map(
-                make_disjoint_window,
-                get_rolling_token_windows(
-                    token_list=tokens,
-                    prefix_token=self.prefix_token_id,
-                    max_seq_len=self.max_length,
-                    context_len=1,
-                ),
+            for context, continuation in rolling_windows(
+                tokens, prefix_token=self.prefix_token_id, max_length=self.max_length
             ):
                 windows.append((None, context, continuation))
                 owners.append(index)
@@ -158,18 +255,18 @@ class TrainstationLM(TemplateLM):
         disable_tqdm: bool = False,
         **kwargs,
     ) -> list[tuple[float, bool]]:
-        # Each request becomes (input tokens, target tokens); the targets are
-        # the last len(targets) positions of the input shifted by one.
-        sequences: list[tuple[list[int], list[int]]] = []
-        for _, context_enc, continuation_enc in requests:
-            if len(continuation_enc) > self.max_length:
-                raise ValueError(
-                    f"Continuation of {len(continuation_enc)} tokens exceeds "
-                    f"max_context_length ({self.max_length})."
-                )
-            # Left-truncate; the last token is only ever a target.
-            tokens = (context_enc + continuation_enc)[-(self.max_length + 1) :]
-            sequences.append((tokens[:-1], continuation_enc))
+        # A whitespace-only context encodes to no tokens with a tokenizer that
+        # adds no BOS (_encode_pair moves the whitespace onto the
+        # continuation); condition it on the prefix token, as lm-eval does for
+        # an empty context.
+        sequences = [
+            to_sequence(
+                context_enc or [self.prefix_token_id],
+                continuation_enc,
+                max_length=self.max_length,
+            )
+            for _, context_enc, continuation_enc in requests
+        ]
 
         # Longest first so buffers fill tightly.
         order = sorted(range(len(sequences)), key=lambda i: -len(sequences[i][0]))
@@ -188,61 +285,25 @@ class TrainstationLM(TemplateLM):
         progress.close()
         return results  # pyrefly: ignore [bad-return]
 
-    def _pack(
-        self, order: list[int], sequences: list[tuple[list[int], list[int]]]
-    ) -> list[list[int]]:
-        batches: list[list[int]] = []
-        current: list[int] = []
-        used = 0
-        for index in order:
-            length = len(sequences[index][0])
-            full = used + length > self.num_tokens_per_batch or (
-                self.max_num_documents is not None
-                and len(current) == self.max_num_documents
-            )
-            if current and full:
-                batches.append(current)
-                current, used = [], 0
-            current.append(index)
-            used += length
-        if current:
-            batches.append(current)
-        return batches
+    def _pack(self, order: list[int], sequences: list[Sequence]) -> list[list[int]]:
+        return pack_sequences(
+            order,
+            sequences,
+            num_tokens_per_batch=self.num_tokens_per_batch,
+            max_num_documents=self.max_num_documents,
+        )
 
     @torch.no_grad()
-    def _score_buffer(
-        self, sequences: list[tuple[list[int], list[int]]]
-    ) -> list[tuple[float, bool]]:
-        size = self.num_tokens_per_batch
-        input_ids = torch.zeros(size, dtype=torch.int64)
-        positions = torch.zeros(size, dtype=torch.int64)
-        padding_mask = torch.ones(size, dtype=torch.bool)
-
-        # Flat indices of the logits that predict each target token.
-        target_rows: list[int] = []
-        target_ids: list[int] = []
-        start = 0
-        for inputs, targets in sequences:
-            end = start + len(inputs)
-            input_ids[start:end] = torch.tensor(inputs)
-            positions[start:end] = torch.arange(len(inputs))
-            padding_mask[start:end] = False
-            target_rows.extend(range(end - len(targets), end))
-            target_ids.extend(targets)
-            start = end
-        if start < size:
-            # Same padding layout as TextCollator.
-            positions[start:] = torch.arange(size - start) % self.max_context_length
-
-        batch = {
-            "input": input_ids,
-            "labels": torch.full((size,), IGNORE_INDEX, dtype=torch.int64),
-            "positions": positions,
-            "padding_mask": padding_mask,
-        }
+    def _score_buffer(self, sequences: list[Sequence]) -> list[tuple[float, bool]]:
+        # target_rows: flat indices of the logits that predict each target.
+        batch, target_rows, target_ids = build_buffer(
+            sequences,
+            size=self.num_tokens_per_batch,
+            max_context_length=self.max_context_length,
+        )
         batch = {k: v.to(self._device, non_blocking=True) for k, v in batch.items()}
-        rows = torch.tensor(target_rows, device=self._device)
-        ids = torch.tensor(target_ids, device=self._device)
+        rows = torch.tensor(target_rows, dtype=torch.int64, device=self._device)
+        ids = torch.tensor(target_ids, dtype=torch.int64, device=self._device)
         with self._forward_context():
             inputs, _, extra_kwargs = self.model.preprocess_inputs(
                 batch,

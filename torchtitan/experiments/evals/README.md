@@ -138,22 +138,100 @@ question and answer.
 ## Suites
 
 Suites are lm-eval groups defined in [`tasks/`](./tasks); any lm-eval task or
-group name also works with `--tasks`.
+group name also works with `--tasks`. Runs are compared on the gold-BPB
+composites of the [step summary](#step-summary); accuracies are logged for
+reading and for comparison with published tables.
 
-| Suite | Tasks |
+| Suite | When | Tasks |
+|---|---|---|
+| `trainstation_quick` | Every checkpoint | `trainstation_ppl`, `trainstation_mc5`, `trainstation_mmlu_cloze`, LAMBADA, and gold BPB of TriviaQA, GSM8K, MATH-500, HumanEval and MBPP |
+| `trainstation_full` | Milestones | `trainstation_quick` + `trainstation_mmlu` |
+| `trainstation_ppl` | | `trainstation_paloma`, Paloma PTB and WikiText-103, OpenWebMath, as bits per byte |
+| `trainstation_paloma` | | Nine Paloma sources (validation split) and their unweighted mean BPB |
+| `trainstation_mc5` | | ARC-Challenge, ARC-Easy, HellaSwag, PIQA, WinoGrande, OpenBookQA, CommonsenseQA (cloze), Social IQa; 5-shot |
+| `trainstation_mmlu_cloze` | | MMLU in cloze form (each answer's text is scored), 5-shot |
+| `trainstation_mmlu` | | MMLU in the lettered format labs report, 5-shot |
+
+Paloma (`allenai/paloma`) is gated: accept its terms on Hugging Face first.
+OpenWebMath is read from Proof-Pile-2's compressed JSON Lines and needs
+`zstandard` (in `requirements.txt`).
+
+### Gold BPB
+
+Accuracy stays at chance for small models on many benchmarks. Gold BPB, the
+bits per byte of the correct answer's text given the prompt, moves smoothly
+from the first checkpoint, so runs can be compared early (Signal and Noise,
+arXiv 2508.13144).
+
+- Multiple-choice tasks: `evaluate.py` logs lm-eval's samples for the units
+  that contain a multiple-choice task and adds `gold_bpb` to every such task
+  whose choices are text (lettered tasks are skipped). A group's `gold_bpb`
+  is its tasks' `gold_bpb` weighted by their number of questions, as lm-eval
+  weights MMLU accuracy. See `scores.py`.
+- Generative tasks: `tasks/gold_bpb/` scores the reference solution (or, for
+  TriviaQA, the canonical answer) as a log-likelihood continuation.
+
+### Step summary
+
+After a step's tasks are written, `evaluate.py` writes `step-N/summary.json`
+with the composites in `scores.py` (logged to W&B as `eval/summary/<name>`),
+each once every member has results:
+
+| Composite | Members |
 |---|---|
-| `trainstation_quick` | WikiText (bits per byte), LAMBADA, HellaSwag, ARC-Easy, PIQA |
-| `trainstation_full` | `trainstation_quick` + ARC-Challenge, WinoGrande, BoolQ, OpenBookQA, SciQ, `trainstation_mmlu` |
-| `trainstation_mmlu` | MMLU, 5-shot, accuracy weighted by subject size |
+| `knowledge_gold_bpb` | Mean gold BPB of ARC-Challenge, ARC-Easy, HellaSwag, MMLU (cloze), TriviaQA |
+| `math_gold_bpb` | GSM8K, MATH-500 |
+| `code_gold_bpb` | HumanEval, MBPP |
+| `cloze_acc` | Mean accuracy (`acc_norm` where defined) of the nine cloze multiple-choice tasks |
+| `paloma_bpb`, `openwebmath_bpb` | The perplexity sets |
 
-Paloma is a good addition to `trainstation_quick` once your Hugging Face
-account has accepted its terms (`allenai/paloma` is gated).
+## Bits per byte in the training loop
+
+`BPBValidator` (`validator.py`) is a `Validator` subclass, set as the
+training config's validator. It reports the BPB of held-out text sets, scored
+exactly as the `bits_per_byte` tasks above score them (each document from
+BOS, lm-eval's rolling windows, the end-of-document token not scored),
+through the trainer's own forward pass and loss. It logs `validation_metrics/<set>/bpb` and
+`/loss`, and `validation_metrics/<prefix>/avg/bpb` for sets that share a
+prefix, plus the core validator's loss with `training_loss=True`. Each
+data-parallel rank scores every n-th rolling window of a set, and all ranks
+run the same number of forward passes, so FSDP, TP and EP stay in lockstep
+(tested so far with two data-parallel ranks on CPU). Pipeline and context
+parallelism raise `ValueError`. The sets are
+tokenized at the first validation, on every rank.
+
+The eval job logs the same sets, on their full validation splits, to W&B as
+`eval/trainstation_paloma_<source>/bits_per_byte`,
+`eval/trainstation_paloma/bits_per_byte` (the nine-source mean, the in-loop
+`paloma/avg`) and `eval/trainstation_openwebmath/bits_per_byte`.
+
+Export the sets once (a fixed slice of at most 8 MB of each validation split,
+and a manifest with paths relative to the output folder):
+
+```bash
+python -m torchtitan.experiments.evals.prepare_bpb_sets --output-folder /path/to/bpb_sets
+```
+
+Then set the validator in the training config:
+
+```python
+from torchtitan.experiments.evals.validator import BPBValidator, bpb_sets_from_manifest
+
+validator=BPBValidator.Config(
+    enable=True,
+    freq=1000,
+    sets=bpb_sets_from_manifest("/path/to/bpb_sets"),
+    # BPB only. To also keep the core validation loss, leave training_loss
+    # True and pass the run's validation dataloader and steps, as for
+    # Validator.Config.
+    training_loss=False,
+)
+```
 
 ## Limitations
 
-- Log-likelihood tasks only. Generative tasks (GSM8K, HumanEval, ...) need a
-  generation loop and are not supported yet.
+- Log-likelihood tasks only. The eval job does not run generative benchmarks
+  (exact match, pass@k); run them on the checkpoint converted to Hugging Face
+  format, for example with lm-eval's `vllm` backend.
 - No FSDP, EP, CP or PP in the eval job (see above), so MoE models too large
   for tensor parallelism alone are not supported yet.
-- Scoring in the training loop is not implemented yet; `TrainstationLM` is
-  written so a validator can reuse it.

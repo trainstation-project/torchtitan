@@ -21,7 +21,20 @@ from torchtitan.experiments.evals.evaluate import (
     write_on_rank0,
 )
 
-QUICK = ["wikitext", "lambada_openai", "hellaswag", "arc_easy", "piqa"]
+QUICK = [
+    "trainstation_paloma",
+    "trainstation_paloma_ptb",
+    "trainstation_paloma_wikitext_103",
+    "trainstation_openwebmath",
+    "trainstation_mc5",
+    "trainstation_mmlu_cloze",
+    "lambada_openai",
+    "triviaqa_gold_bpb",
+    "gsm8k_gold_bpb",
+    "math500_gold_bpb",
+    "humaneval_gold_bpb",
+    "mbpp_gold_bpb",
+]
 
 
 @pytest.fixture(scope="module")
@@ -30,24 +43,16 @@ def task_manager():
 
 
 def test_expand_tasks(task_manager):
+    # Suites expand recursively into their members. Groups that aggregate
+    # (trainstation_paloma, trainstation_mc5, the MMLU groups) stay whole.
     assert expand_tasks(["trainstation_quick"], task_manager) == QUICK
-    # Suites expand recursively; trainstation_mmlu aggregates, so it stays whole.
     assert expand_tasks(["trainstation_full"], task_manager) == QUICK + [
-        "arc_challenge",
-        "winogrande",
-        "boolq",
-        "openbookqa",
-        "sciq",
-        "trainstation_mmlu",
+        "trainstation_mmlu"
     ]
     # A task listed twice, directly and through a suite, is kept once.
-    assert expand_tasks(["hellaswag", "trainstation_quick"], task_manager) == [
-        "hellaswag",
-        "wikitext",
-        "lambada_openai",
-        "arc_easy",
-        "piqa",
-    ]
+    assert expand_tasks(["gsm8k_gold_bpb", "trainstation_quick"], task_manager) == [
+        "gsm8k_gold_bpb"
+    ] + [unit for unit in QUICK if unit != "gsm8k_gold_bpb"]
     assert expand_tasks(["mmlu"], task_manager) == ["mmlu"]
 
 

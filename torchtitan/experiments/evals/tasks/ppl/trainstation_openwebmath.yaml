@@ -1,0 +1,20 @@
+# Proof-Pile-2 open-web-math validation split (31,576 math web pages). The
+# test split stays untouched for final reporting. Reading .jsonl.zst needs
+# the zstandard package.
+task: trainstation_openwebmath
+dataset_path: json
+dataset_kwargs:
+  data_files:
+    validation: hf://datasets/EleutherAI/proof-pile-2/open-web-math/validation/*.jsonl.zst
+output_type: loglikelihood_rolling
+validation_split: validation
+doc_to_text: ""
+doc_to_target: !function ppl_utils.doc_to_text
+should_decontaminate: true
+doc_to_decontamination_query: !function ppl_utils.doc_to_text
+metric_list:
+  - metric: bits_per_byte
+    aggregation: bits_per_byte
+    higher_is_better: false
+metadata:
+  version: 0

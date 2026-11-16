@@ -1,13 +1,10 @@
-# Standard base-model suite for milestone checkpoints. Log-likelihood tasks
-# only; generative tasks (GSM8K, HumanEval, ...) are not supported yet.
+# Milestone checkpoints: trainstation_quick plus lettered 5-shot MMLU, the
+# format labs report. Generative milestone benchmarks (GSM8K and MATH exact
+# match, HumanEval and MBPP pass@k, BBH, ...) need generation and run on the
+# checkpoint converted to Hugging Face format; see README.md.
 group: trainstation_full
 task:
   - trainstation_quick
-  - arc_challenge
-  - winogrande
-  - boolq
-  - openbookqa
-  - sciq
   - trainstation_mmlu
 metadata:
-  version: 0
+  version: 1

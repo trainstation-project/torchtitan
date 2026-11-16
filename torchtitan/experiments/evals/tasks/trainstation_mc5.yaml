@@ -1,0 +1,19 @@
+# Commonsense and science multiple choice, 5-shot, cloze form (each answer's
+# text is scored). Kept as one group so num_fewshot applies to every task.
+# evaluate.py adds each task's gold BPB from the logged samples.
+group: trainstation_mc5
+num_fewshot: 5
+task:
+  - arc_challenge
+  - arc_easy
+  - hellaswag
+  - piqa
+  - winogrande
+  - openbookqa
+  - commonsense_qa_cloze
+  - social_iqa
+aggregate_metric_list:
+  - metric: acc
+    weight_by_size: false
+metadata:
+  version: 0

@@ -176,6 +176,22 @@ def test_loglikelihood_rolling_matches_reference(
         assert logprob == pytest.approx(expected, abs=1e-3)
 
 
+def test_empty_context_is_rejected():
+    with pytest.raises(ValueError, match="context"):
+        lm_module.to_sequence([], [5, 6], max_length=8)
+
+
+def test_empty_context_is_conditioned_on_the_prefix_token(model, tokenizer):
+    # A whitespace-only context encodes to no tokens once _encode_pair moves
+    # the whitespace onto the continuation.
+    lm = _make_lm(model, tokenizer)
+    continuation = tokenizer.encode(" Paris", add_bos=False, add_eos=False)
+    empty, prefixed = lm._loglikelihood_tokens(
+        [(None, [], continuation), (None, [lm.prefix_token_id], continuation)]
+    )
+    assert empty == pytest.approx(prefixed)
+
+
 def test_pack_respects_limits(model, tokenizer):
     lm = _make_lm(model, tokenizer, num_tokens_per_batch=MAX_CONTEXT_LENGTH)
     lm.max_num_documents = 2

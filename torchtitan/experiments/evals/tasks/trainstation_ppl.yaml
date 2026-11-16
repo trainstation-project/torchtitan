@@ -1,0 +1,11 @@
+# Held-out perplexity sets scored as bits per byte (lower is better): the
+# Paloma validation split and OpenWebMath. The same sets run in the training
+# loop through BPBValidator.
+group: trainstation_ppl
+task:
+  - trainstation_paloma
+  - trainstation_paloma_ptb
+  - trainstation_paloma_wikitext_103
+  - trainstation_openwebmath
+metadata:
+  version: 0

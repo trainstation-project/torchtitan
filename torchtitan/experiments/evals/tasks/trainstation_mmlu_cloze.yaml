@@ -1,0 +1,43 @@
+# MMLU in cloze form (lm-eval's mmlu_continuation: each answer's text is the
+# continuation), 5-shot, accuracy weighted by subject size. Above chance for
+# small models, unlike the lettered format in trainstation_mmlu.
+group: trainstation_mmlu_cloze
+num_fewshot: 5
+task: [
+  mmlu_abstract_algebra_continuation, mmlu_anatomy_continuation,
+  mmlu_astronomy_continuation, mmlu_business_ethics_continuation,
+  mmlu_clinical_knowledge_continuation, mmlu_college_biology_continuation,
+  mmlu_college_chemistry_continuation, mmlu_college_computer_science_continuation,
+  mmlu_college_mathematics_continuation, mmlu_college_medicine_continuation,
+  mmlu_college_physics_continuation, mmlu_computer_security_continuation,
+  mmlu_conceptual_physics_continuation, mmlu_econometrics_continuation,
+  mmlu_electrical_engineering_continuation, mmlu_elementary_mathematics_continuation,
+  mmlu_formal_logic_continuation, mmlu_global_facts_continuation,
+  mmlu_high_school_biology_continuation, mmlu_high_school_chemistry_continuation,
+  mmlu_high_school_computer_science_continuation, mmlu_high_school_european_history_continuation,
+  mmlu_high_school_geography_continuation, mmlu_high_school_government_and_politics_continuation,
+  mmlu_high_school_macroeconomics_continuation, mmlu_high_school_mathematics_continuation,
+  mmlu_high_school_microeconomics_continuation, mmlu_high_school_physics_continuation,
+  mmlu_high_school_psychology_continuation, mmlu_high_school_statistics_continuation,
+  mmlu_high_school_us_history_continuation, mmlu_high_school_world_history_continuation,
+  mmlu_human_aging_continuation, mmlu_human_sexuality_continuation,
+  mmlu_international_law_continuation, mmlu_jurisprudence_continuation,
+  mmlu_logical_fallacies_continuation, mmlu_machine_learning_continuation,
+  mmlu_management_continuation, mmlu_marketing_continuation,
+  mmlu_medical_genetics_continuation, mmlu_miscellaneous_continuation,
+  mmlu_moral_disputes_continuation, mmlu_moral_scenarios_continuation,
+  mmlu_nutrition_continuation, mmlu_philosophy_continuation,
+  mmlu_prehistory_continuation, mmlu_professional_accounting_continuation,
+  mmlu_professional_law_continuation, mmlu_professional_medicine_continuation,
+  mmlu_professional_psychology_continuation, mmlu_public_relations_continuation,
+  mmlu_security_studies_continuation, mmlu_sociology_continuation,
+  mmlu_us_foreign_policy_continuation, mmlu_virology_continuation,
+  mmlu_world_religions_continuation
+]
+aggregate_metric_list:
+  - metric: acc
+    weight_by_size: true
+  - metric: acc_norm
+    weight_by_size: true
+metadata:
+  version: 0

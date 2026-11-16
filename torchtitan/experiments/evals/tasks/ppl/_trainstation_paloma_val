@@ -1,0 +1,16 @@
+# Paloma (allenai/paloma, gated: accept its terms on Hugging Face) scored on
+# its validation split. lm-eval's own paloma_* tasks score the test split,
+# which we keep untouched for final reporting.
+dataset_path: allenai/paloma
+output_type: loglikelihood_rolling
+validation_split: val
+doc_to_text: ""
+doc_to_target: !function ppl_utils.doc_to_text
+should_decontaminate: true
+doc_to_decontamination_query: !function ppl_utils.doc_to_text
+metric_list:
+  - metric: bits_per_byte
+    aggregation: bits_per_byte
+    higher_is_better: false
+metadata:
+  version: 0

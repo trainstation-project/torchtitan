@@ -1,11 +1,16 @@
-# Fast pretraining signal for every checkpoint: held-out bits-per-byte plus
-# zero-shot cloze-style multiple choice. Log-likelihood tasks only.
+# Every saved checkpoint: held-out BPB plus downstream benchmarks scored by
+# log-likelihood. Gold BPB (bits per byte of the correct answer) is the
+# decision metric; cloze accuracy is the readable one. See README.md.
 group: trainstation_quick
 task:
-  - wikitext
+  - trainstation_ppl
+  - trainstation_mc5
+  - trainstation_mmlu_cloze
   - lambada_openai
-  - hellaswag
-  - arc_easy
-  - piqa
+  - triviaqa_gold_bpb
+  - gsm8k_gold_bpb
+  - math500_gold_bpb
+  - humaneval_gold_bpb
+  - mbpp_gold_bpb
 metadata:
-  version: 0
+  version: 1

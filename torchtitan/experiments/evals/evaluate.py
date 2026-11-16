@@ -31,6 +31,7 @@ from lm_eval.tasks import TaskManager
 
 from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.evals import scores
 from torchtitan.experiments.evals.checkpoint import (
     build_model,
     eval_parallelism,
@@ -211,6 +212,22 @@ def cache_datasets_then_go_offline(tasks: list[str], task_manager: TaskManager) 
     datasets.config.HF_HUB_OFFLINE = True
 
 
+def multiple_choice_units(tasks: list[str], task_manager: TaskManager) -> set[str]:
+    """The units with a multiple-choice task, whose samples give gold BPB.
+
+    Samples are logged only for these: the other units' samples can hold
+    whole documents (the perplexity sets) and are not needed.
+    """
+    return {
+        unit
+        for unit in tasks
+        if any(
+            task.OUTPUT_TYPE == "multiple_choice"
+            for task in task_manager.load([unit])["tasks"].values()
+        )
+    }
+
+
 def load_contamination_report(path: str, tasks: list[str]) -> dict[str, Any]:
     """Load a contamination.py report and check it covers ``tasks``."""
     if not os.path.exists(path):
@@ -275,13 +292,18 @@ def evaluate_step(
     task_manager: TaskManager,
     ckpt_folder: str,
     output_folder: str,
+    suite_units: list[str],
     contamination: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+    sample_units: frozenset[str] = frozenset(),
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, float]]:
     """Evaluate one checkpoint on ``tasks``, writing one results file per task.
 
     Tasks ending in CLEAN_SUFFIX are scored on the questions ``contamination``
-    marks clean. Returns the lm-eval results of the full and of the clean
-    evaluations, keyed by task and subtask.
+    marks clean. Units in ``sample_units`` get gold BPB (scores.py). Updates
+    the step's summary.json with the composites of ``suite_units``, all the
+    suite's units, of which ``tasks`` may be only the ones still missing.
+    Returns the lm-eval results of the full and of the clean evaluations,
+    keyed by task and subtask, and the step's summary.
     """
     checkpoint = os.path.join(ckpt_folder, f"step-{step}")
     logger.info(f"Evaluating {checkpoint} on {tasks}")
@@ -308,14 +330,21 @@ def evaluate_step(
             logger.warning(f"Skipping {task}: every question of a subtask overlaps.")
             results = {"results": {}}
         else:
+            log_samples = base in sample_units
             results = simple_evaluate(
                 model=lm,
                 tasks=[base],
                 limit=args.limit,
                 samples=samples,
                 task_manager=task_manager,
-                log_samples=False,
+                log_samples=log_samples,
             )
+            # Data-parallel rank 0 gets results (and the gathered samples);
+            # global rank 0 writes them.
+            if log_samples and results is not None:
+                if dist.get_rank() == 0:
+                    scores.add_gold_bpb(results)
+                results.pop("samples", None)
         record = None
         # Every TP rank of data-parallel rank 0 gets results; rank 0 writes.
         if dist.get_rank() == 0:
@@ -340,7 +369,17 @@ def evaluate_step(
         path = results_path(output_folder, step, task)
         write_on_rank0(path, record or {})
         logger.info(f"Wrote {path}")
-    return all_results, clean_results
+    step_folder = os.path.join(output_folder, f"step-{step}")
+    summary = broadcast_from_rank0(
+        lambda: scores.step_summary(
+            step_folder, [u for u in suite_units if not u.endswith(CLEAN_SUFFIX)]
+        )
+    )
+    write_on_rank0(
+        os.path.join(step_folder, scores.SUMMARY_FILE),
+        {"step": step, "summary": summary},
+    )
+    return all_results, clean_results, summary
 
 
 def main() -> None:
@@ -380,6 +419,9 @@ def main() -> None:
     tasks = expand_tasks(args.tasks, task_manager)
     logger.info(f"Results are stored per task: {tasks}")
     cache_datasets_then_go_offline(tasks, task_manager)
+    sample_units = frozenset(
+        broadcast_from_rank0(lambda: multiple_choice_units(tasks, task_manager))
+    )
     contamination = None
     if args.decontaminate:
         contamination = load_contamination_report(
@@ -401,7 +443,7 @@ def main() -> None:
         while True:
             work = pending_work(args, tasks, ckpt_folder, output_folder)
             for step, step_tasks in work:
-                results, clean_results = evaluate_step(
+                results, clean_results, summary = evaluate_step(
                     step,
                     step_tasks,
                     args=args,
@@ -411,9 +453,11 @@ def main() -> None:
                     ckpt_folder=ckpt_folder,
                     output_folder=output_folder,
                     contamination=contamination,
+                    sample_units=sample_units,
+                    suite_units=tasks,
                 )
                 if wandb_logger is not None:
-                    wandb_logger.log(step, results, clean_results)
+                    wandb_logger.log(step, results, clean_results, summary)
             if work:
                 last_work = time.monotonic()
             if not args.watch:

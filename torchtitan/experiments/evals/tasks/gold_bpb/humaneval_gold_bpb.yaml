@@ -1,0 +1,16 @@
+# BPB of the canonical HumanEval solution given the prompt, 0-shot.
+task: humaneval_gold_bpb
+dataset_path: openai/openai_humaneval
+output_type: loglikelihood
+test_split: test
+doc_to_text: "{{prompt}}"
+doc_to_target: "{{canonical_solution}}"
+target_delimiter: ""
+process_results: !function gold_bpb_utils.humaneval_results
+metric_list:
+  - metric: bits_per_byte
+    aggregation: bits_per_byte
+    higher_is_better: false
+num_fewshot: 0
+metadata:
+  version: 0

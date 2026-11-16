@@ -1,0 +1,20 @@
+# BPB of the reference GSM8K solution (reasoning and "#### answer"), 8-shot.
+# The target carries its own leading space (see gold_bpb_utils.py).
+task: gsm8k_gold_bpb
+dataset_path: openai/gsm8k
+dataset_name: main
+output_type: loglikelihood
+training_split: train
+fewshot_split: train
+test_split: test
+doc_to_text: "Question: {{question}}\nAnswer:"
+doc_to_target: " {{answer}}"
+target_delimiter: ""
+process_results: !function gold_bpb_utils.gsm8k_results
+metric_list:
+  - metric: bits_per_byte
+    aggregation: bits_per_byte
+    higher_is_better: false
+num_fewshot: 8
+metadata:
+  version: 0
