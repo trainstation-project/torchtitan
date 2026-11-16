@@ -89,7 +89,7 @@ class TestTokenizerIntegration(unittest.TestCase):
             self.assertIn("hello", text)
 
             # No chat template should be set
-            self.assertIsNone(tok._chat_template)
+            self.assertIsNone(tok._chat_template_source)
 
     def test_same_bos_eos_token_is_inferred_for_both_ids(self):
         """Tokenizers like GPT-2 use one token as both BOS and EOS."""
@@ -453,6 +453,17 @@ class TestBaseTokenizerChatTemplate(unittest.TestCase):
         result = tok.apply_chat_template([])
         self.assertEqual(result, "012")
 
+    def test_uncompilable_template_fails_only_on_use(self):
+        """Templates are compiled lazily, so loading a tokenizer whose template
+        uses tags we don't support (e.g. HF's {% generation %}) only fails
+        when chat rendering is actually requested."""
+        from jinja2.exceptions import TemplateSyntaxError
+
+        tok = DummyTokenizer()
+        tok.set_chat_template("{% generation %}x{% endgeneration %}")
+        with self.assertRaises(TemplateSyntaxError):
+            tok.apply_chat_template(SAMPLE_MESSAGES)
+
     def test_strftime_now(self):
         """Test that strftime_now works in templates."""
         from datetime import datetime
@@ -469,7 +480,7 @@ class TestHuggingFaceChatTemplateAutoLoad(unittest.TestCase):
     def test_auto_loads_chat_template_from_config(self):
         """The test asset tokenizer_config.json includes a chat_template field."""
         tok = HuggingFaceTokenizer(tokenizer_path=ASSETS_TOKENIZER)
-        self.assertIsNotNone(tok._chat_template)
+        self.assertIsNotNone(tok._chat_template_source)
 
     def test_no_chat_template_when_config_lacks_field(self):
         """When tokenizer_config.json has no chat_template, _chat_template stays None."""
@@ -491,7 +502,7 @@ class TestHuggingFaceChatTemplateAutoLoad(unittest.TestCase):
                 json.dump(config, f)
 
             tok = HuggingFaceTokenizer(tokenizer_path=tmpdir)
-            self.assertIsNone(tok._chat_template)
+            self.assertIsNone(tok._chat_template_source)
 
     def test_auto_loads_chat_template_from_jinja_file(self):
         """Standalone chat_template.jinja is loaded (e.g. GPT-OSS)."""
@@ -514,7 +525,7 @@ class TestHuggingFaceChatTemplateAutoLoad(unittest.TestCase):
                 f.write(CHATML_TEMPLATE)
 
             tok = HuggingFaceTokenizer(tokenizer_path=tmpdir)
-            self.assertIsNotNone(tok._chat_template)
+            self.assertIsNotNone(tok._chat_template_source)
 
     def test_jinja_file_takes_priority_over_inline(self):
         """Standalone .jinja file takes priority over inline tokenizer_config.json."""

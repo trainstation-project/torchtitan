@@ -30,6 +30,10 @@ class BaseTokenizer(ABC, Configurable):
 
     def __init__(self):
         self.eos_id = None
+        # Template source is stored as-is and compiled on first use, so
+        # tokenizers that never render chat (e.g. pretraining) don't fail on
+        # templates whose syntax we can't compile.
+        self._chat_template_source: str | None = None
         self._chat_template = None
 
     @abstractmethod
@@ -45,7 +49,11 @@ class BaseTokenizer(ABC, Configurable):
         ...
 
     def set_chat_template(self, template: str) -> None:
-        """Compile and store a Jinja chat template."""
+        """Store a Jinja chat template; it is compiled on first use."""
+        self._chat_template_source = template
+        self._chat_template = None
+
+    def _compile_chat_template(self, template: str):
         import json
 
         import jinja2
@@ -79,7 +87,7 @@ class BaseTokenizer(ABC, Configurable):
         env.globals["raise_exception"] = raise_exception
         env.globals["strftime_now"] = strftime_now
         env.filters["tojson"] = tojson
-        self._chat_template = env.from_string(template)
+        return env.from_string(template)
 
     def apply_chat_template(
         self, messages: Sequence[Mapping[str, Any]], **kwargs
@@ -92,8 +100,12 @@ class BaseTokenizer(ABC, Configurable):
         Additional template variables (e.g. add_generation_prompt, tools) can be
         passed as kwargs.
         """
-        if self._chat_template is None:
+        if self._chat_template_source is None:
             raise ValueError("No chat template set. Call set_chat_template() first.")
+        if self._chat_template is None:
+            self._chat_template = self._compile_chat_template(
+                self._chat_template_source
+            )
         return self._chat_template.render(messages=messages, **kwargs)
 
 
