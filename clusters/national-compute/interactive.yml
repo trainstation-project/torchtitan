@@ -2,6 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: interactive-gpu
+  namespace: default
 spec:
   backoffLimit: 0
   template:
@@ -10,13 +11,22 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: shell
-          # Replace this with the AMD/ROCm-compatible image you want to use.
-          image: rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
-          command: ["/bin/bash", "-lc", "sleep infinity"]
+          image: rocm/pytorch:rocm10.1.0_ubuntu24.04_py3.12_pytorch_release_2.14.0
+          workingDir: /mnt/shared/mayank/trainstation
+          command: ["/bin/bash", "-lc"]
+          args:
+            pip install tyro spmd-types grain datasets tokenizers renderers tensorboard torch-remat
+            - |
+              set -euxo pipefail
+              python3 -m pip install --no-cache-dir -r requirements.txt
+              python3 -m pip install --no-cache-dir 'torch_checkpointing>=0.1.0'
+              python3 -c "import torch, torchvision, torchaudio, tyro, torch_checkpointing; print('runtime dependencies verified')"
+              exec sleep infinity
           stdin: true
           tty: true
           resources:
             requests:
+              # National Compute admits GPU workloads only as full nodes.
               amd.com/gpu: 8
             limits:
               amd.com/gpu: 8
