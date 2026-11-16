@@ -1,0 +1,20 @@
+# The nine Paloma sources that represent our training domains, with their
+# unweighted mean BPB. PTB and WikiText-103 are small and old: they are in
+# trainstation_ppl but not in this average.
+group: trainstation_paloma
+task:
+  - trainstation_paloma_c4_en
+  - trainstation_paloma_c4_100_domains
+  - trainstation_paloma_dolma-v1_5
+  - trainstation_paloma_dolma_100_programing_languages
+  - trainstation_paloma_dolma_100_subreddits
+  - trainstation_paloma_falcon-refinedweb
+  - trainstation_paloma_m2d2_s2orc_unsplit
+  - trainstation_paloma_m2d2_wikipedia_unsplit
+  - trainstation_paloma_redpajama
+aggregate_metric_list:
+  - metric: bits_per_byte
+    aggregation: mean
+    weight_by_size: false
+metadata:
+  version: 0

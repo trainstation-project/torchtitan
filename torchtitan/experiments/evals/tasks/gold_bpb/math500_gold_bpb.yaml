@@ -1,0 +1,17 @@
+# BPB of the reference MATH-500 solution, 0-shot.
+# The target carries its own leading space (see gold_bpb_utils.py).
+task: math500_gold_bpb
+dataset_path: HuggingFaceH4/MATH-500
+output_type: loglikelihood
+test_split: test
+doc_to_text: "Problem:\n{{problem}}\n\nSolution:"
+doc_to_target: " {{solution}}"
+target_delimiter: ""
+process_results: !function gold_bpb_utils.math_results
+metric_list:
+  - metric: bits_per_byte
+    aggregation: bits_per_byte
+    higher_is_better: false
+num_fewshot: 0
+metadata:
+  version: 0

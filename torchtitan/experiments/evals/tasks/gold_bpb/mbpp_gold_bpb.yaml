@@ -1,0 +1,20 @@
+# BPB of the reference MBPP solution, 3-shot in lm-eval's mbpp prompt format.
+task: mbpp_gold_bpb
+dataset_path: google-research-datasets/mbpp
+dataset_name: full
+output_type: loglikelihood
+test_split: test
+fewshot_split: prompt
+fewshot_config:
+  sampler: first_n
+doc_to_text: "You are an expert Python programmer, and here is your task: {{text}} Your code should pass these tests:\n\n{{test_list[0]}}\n{{test_list[1]}}\n{{test_list[2]}}\n[BEGIN]\n"
+doc_to_target: "{{code}}\n[DONE]"
+target_delimiter: ""
+process_results: !function gold_bpb_utils.mbpp_results
+metric_list:
+  - metric: bits_per_byte
+    aggregation: bits_per_byte
+    higher_is_better: false
+num_fewshot: 3
+metadata:
+  version: 0

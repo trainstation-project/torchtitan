@@ -67,11 +67,17 @@ class EvalWandBLogger:
         self.run.define_metric("eval_clean/*", step_metric="train_step")
 
     def log(
-        self, step: int, results: dict[str, Any], clean_results: dict[str, Any]
+        self,
+        step: int,
+        results: dict[str, Any],
+        clean_results: dict[str, Any],
+        summary: dict[str, float] | None = None,
     ) -> None:
-        """Log ``results`` under eval/ and clean-subset results under eval_clean/."""
+        """Log ``results`` under eval/, clean-subset results under eval_clean/,
+        and the step's composites (scores.summarize) under eval/summary/."""
         metrics = flatten_results(results)
         metrics.update(flatten_results(clean_results, prefix="eval_clean"))
+        metrics.update({f"eval/summary/{k}": v for k, v in (summary or {}).items()})
         self.run.log({"train_step": step, **metrics})
 
     def close(self) -> None:
