@@ -4,19 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""GptTrainstation: one decoder that mixes every shared layer type, for test coverage.
+"""GptTrainstation: one GQA decoder mixing dense MLP and MoE layers, for test coverage.
 
-The debug flavor repeats a four-layer pattern so that every pipeline stage of a
-2- or 4-stage split sees every layer type:
+Every layer uses GQA (CosSin RoPE, QK norm). The debug flavor repeats a
+four-layer FFN pattern so that every pipeline stage of a 2-stage split sees
+every FFN type:
 
-    layer % 4 == 0: GQA (CosSin RoPE, QK norm)   + dense MLP
-    layer % 4 == 1: MLA (no query LoRA)          + MoE, softmax router
-    layer % 4 == 2: GQA (CosSin RoPE, QK norm)   + MoE, grouped sigmoid router,
-                                                   shared experts, aux loss
-    layer % 4 == 3: MLA (query LoRA, YaRN RoPE)  + dense MLP
+    layer % 4 == 0: dense MLP
+    layer % 4 == 1: MoE, softmax router, routed experts only
+    layer % 4 == 2: MoE, sigmoid router, shared experts, aux loss
+    layer % 4 == 3: dense MLP
 """
 
+import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 
 import torch.nn as nn
@@ -28,7 +30,6 @@ from torchtitan.config.transform import (
 )
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
-    ComplexRoPE,
     CosSinRoPE,
     Embedding,
     Linear,
@@ -47,10 +48,6 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.deepseek_v3 import (
-    make_deepseek_v3_router_config,
-    make_mla_attention_config,
-)
 from torchtitan.models.qwen3.parallelize import parallelize_qwen3
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -106,30 +103,18 @@ def _moe(
 ) -> MoE.Config:
     """MoE in one of two styles.
 
-    ``deepseek_style=False``: softmax top-k router, routed experts only.
-    ``deepseek_style=True``: sigmoid router with node-limited (grouped)
-    routing, shared experts, and a sequence-wise auxiliary loss.
+    ``with_shared_experts=False``: softmax top-k router, routed experts only.
+    ``with_shared_experts=True``: sigmoid top-k router, shared experts, and a
+    microbatch-wise auxiliary load-balancing loss.
     """
-    if deepseek_style:
-        router = make_deepseek_v3_router_config(
-            dim=dim,
-            num_experts=num_experts,
-            gate_param_init=_depth_init(layer_id),
-            top_k=top_k,
-            score_func=Sigmoid.Config(),
-            route_norm=True,
-            num_expert_groups=2,
-            num_limited_groups=1,
-        )
-    else:
-        router = make_router_config(
-            dim=dim,
-            num_experts=num_experts,
-            gate_param_init=_LINEAR_INIT,
-            top_k=top_k,
-            score_func=Softmax.Config(),
-            route_norm=True,
-        )
+    router = make_router_config(
+        dim=dim,
+        num_experts=num_experts,
+        gate_param_init=hidden_init,
+        top_k=top_k,
+        score_func=Sigmoid.Config() if with_shared_experts else Softmax.Config(),
+        route_norm=True,
+    )
     return make_moe_config(
         num_experts=num_experts,
         router=router,
@@ -250,6 +235,7 @@ def _debugmodel(
                 ffn_norm=_norm(dim),
                 feed_forward=feed_forward,
                 moe=moe,
+                m_residual=None if mup is None else mup.m_residual,
             )
         )
 
@@ -264,6 +250,8 @@ def _debugmodel(
             in_features=dim, out_features=vocab_size, param_init=_LINEAR_INIT
         ),
         layers=layers,
+        m_emb=None if mup is None else mup.m_emb,
+        m_width=None if mup is None else mup.m_width,
     )
 
 
@@ -286,6 +274,7 @@ def model_registry(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
+    mup: MuPConfig | None = None,
 ) -> ModelSpec:
     get_config, max_context_len = gpt_trainstation_configs[flavor]
     context_len = seq_len or max_context_len
@@ -299,6 +288,7 @@ def model_registry(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         seq_len=context_len,
+        mup=mup,
     )
     if converters is not None:
         validate_converter_compatibility(converters)

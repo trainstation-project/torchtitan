@@ -296,8 +296,8 @@ def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
     return config
 
 
-# GptTrainstation mixes GQA/MLA attention with dense MLP and MoE (with and without
-# shared experts) in one model, so these layouts cover every layer type at once.
+# GptTrainstation mixes dense MLP and MoE (with and without
+# shared experts) in one model, so these layouts cover every FFN type at once.
 
 
 def gpt_trainstation_debugmodel_fsdp2_tp2_ep2_spmd_typecheck() -> Trainer.Config:
@@ -428,6 +428,23 @@ def gpt_trainstation_debugmodel_dist_muon_fsdp2_pp2_ep2() -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.num_pp_microbatches = 4
+    return config
+
+
+def gpt_trainstation_debugmodel_mup_fsdp2_pp2_ep2() -> Trainer.Config:
+    """muP with PP: the first stage owns the embedding multiplier, the last
+    stage the logit multiplier, and each stage builds its own lr groups."""
+    from torchtitan.models.gpt_trainstation.config_registry import (
+        gpt_trainstation_debugmodel_mup,
+    )
+
+    config = gpt_trainstation_debugmodel_mup(seq_len=512)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.parallelism.num_pp_microbatches = 2
     return config
 
 

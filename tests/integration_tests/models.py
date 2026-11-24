@@ -174,7 +174,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
             use_real_pg=True,
         ),
-        # Integration Test Cases for GptTrainstation (GQA + MLA, dense MLP + MoE)
+        # Integration Test Cases for GptTrainstation (GQA, dense MLP + MoE)
         OverrideDefinitions(
             configs=[recipes.gpt_trainstation_debugmodel_fsdp2_tp2_ep2_spmd_typecheck],
             test_descr="GptTrainstation SPMD-typed FSDP+TP+SP+EP",
@@ -214,6 +214,13 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="gpt_trainstation_dist_muon_pp+fsdp+ep",
             ngpu=4,
             timeout=600,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.gpt_trainstation_debugmodel_mup_fsdp2_pp2_ep2],
+            test_descr="GptTrainstation muP PP+FSDP+EP",
+            test_name="gpt_trainstation_mup_pp+fsdp+ep",
+            ngpu=4,
             use_real_pg=True,
         ),
         OverrideDefinitions(

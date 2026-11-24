@@ -11,7 +11,6 @@ import torch.nn as nn
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.deepseek_v3.model import Attention as MLAttention
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
@@ -19,16 +18,16 @@ from torchtitan.models.utils import (
 
 
 class GptTrainstationTransformerBlock(TransformerBlock):
-    """Transformer block whose attention and FFN types are chosen per layer.
+    """GQA transformer block whose FFN type is chosen per layer.
 
-    ``attention`` may be GQA (``GQAttention``) or multi-head latent attention
-    (DeepSeek V3 ``Attention``). Exactly one of ``feed_forward`` (dense MLP)
-    and ``moe`` is set.
+    Exactly one of ``feed_forward`` (dense MLP) and ``moe`` is set.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        pass
+        m_residual: float | None = None
+        """muP residual multiplier: scales each branch output before the
+        residual add. ``None`` disables it."""
 
     def __init__(self, config: Config):
         super().__init__()
@@ -40,6 +39,8 @@ class GptTrainstationTransformerBlock(TransformerBlock):
         self.attention = config.attention.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
+
+        self.m_residual = config.m_residual
 
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:
@@ -57,25 +58,39 @@ class GptTrainstationTransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
     ):
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
+        h = self.attention(self.attention_norm(x), attention_masks, positions)
+        if self.m_residual is not None:
+            h = h * self.m_residual
+        x = x + h
+
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+            h = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:
-            x = x + self.feed_forward(self.ffn_norm(x))
-        return x
+            h = self.feed_forward(self.ffn_norm(x))
+        if self.m_residual is not None:
+            h = h * self.m_residual
+        return x + h
 
 
 class GptTrainstationModel(Decoder):
-    """Decoder that mixes every shared layer type in one model.
+    """GQA decoder that mixes dense MLP and MoE layers in one model.
 
     It has no released checkpoint. Its purpose is test coverage: a single
-    model whose layers interleave GQA and MLA attention with dense MLP and MoE
-    (with and without shared experts, softmax and sigmoid routers), so every
+    model whose GQA layers interleave dense MLP and MoE (with and without
+    shared experts, softmax and sigmoid routers), so every
     parallelism combination can be exercised against all of them at once.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
+        m_emb: float | None = None
+        """muP embedding multiplier applied to the token embedding output.
+        ``None`` disables it."""
+
+        m_width: float | None = None
+        """muP width multiplier (``dim / base_dim``). Logits are scaled by
+        ``1 / m_width``. ``None`` disables it."""
+
         def update_from_config(
             self,
             *,
@@ -102,22 +117,16 @@ class GptTrainstationModel(Decoder):
             attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
-                if isinstance(attention, MLAttention.Config):
-                    qk_head_dim = (
-                        attention.qk_nope_head_dim + attention.qk_rope_head_dim
-                    )
-                    v_head_dim = attention.v_head_dim
-                else:
-                    assert isinstance(attention, GQAttention.Config)
-                    qk_head_dim = v_head_dim = (
-                        attention.head_dim
-                        if attention.head_dim is not None
-                        else attention.dim // attention.n_heads
-                    )
+                assert isinstance(attention, GQAttention.Config)
+                head_dim = (
+                    attention.head_dim
+                    if attention.head_dim is not None
+                    else attention.dim // attention.n_heads
+                )
                 attention_op_flops += quadratic_attention_flops_per_token(
                     num_heads=attention.n_heads,
-                    qk_head_dim=qk_head_dim,
-                    v_head_dim=v_head_dim,
+                    qk_head_dim=head_dim,
+                    v_head_dim=head_dim,
                     seq_len=seq_len,
                 )
             return nparams, 6 * active_nparams + attention_op_flops

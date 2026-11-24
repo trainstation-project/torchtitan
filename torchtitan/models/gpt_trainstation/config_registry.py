@@ -27,12 +27,11 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.deepseek_v3.model import Attention as MLAttention
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
-from . import model_registry
+from . import model_registry, MuPConfig
 from .model import GptTrainstationModel
 
 
@@ -138,13 +137,8 @@ def dist_muon_optimizer(
     compute_sharding_by_fqn: dict[str, ComputeLayout] = {}
     for layer_id, layer in enumerate(model_config.layers):
         prefix = f"layers.{layer_id}"
-        attention = layer.attention
-        if isinstance(attention, MLAttention.Config):
-            projections = ["wkv_a", "wkv_b", "wo"]
-            projections += ["wq_a", "wq_b"] if attention.q_lora_rank else ["wq"]
-        else:
-            assert isinstance(attention, GQAttention.Config)
-            projections = ["qkv_linear.wqkv", "wo"]
+        assert isinstance(layer.attention, GQAttention.Config)
+        projections = ["qkv_linear.wqkv", "wo"]
         dense_fqns = [f"{prefix}.attention.{p}.weight" for p in projections]
 
         if layer.feed_forward is not None:

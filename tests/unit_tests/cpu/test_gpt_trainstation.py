@@ -11,12 +11,12 @@ import torch.nn.functional as F
 
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.deepseek_v3.model import Attention as MLAttention
-from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
-from torchtitan.models.gpt_trainstation import gpt_trainstation_configs
+from torchtitan.models.gpt_trainstation import gpt_trainstation_configs, MuPConfig
 from torchtitan.models.gpt_trainstation.config_registry import (
     dist_muon_optimizer,
     gpt_trainstation_debugmodel,
+    gpt_trainstation_debugmodel_mup,
+    mup_adamw_optimizer,
 )
 
 _SEQ_LEN = 64
@@ -41,7 +41,7 @@ class _CausalAttention(nn.Module):
         return out_HTV.transpose(0, 1)
 
 
-def _debug_config():
+def _debug_config(mup: MuPConfig | None = None):
     build_config, _ = gpt_trainstation_configs["debugmodel"]
     return build_config("flex", seq_len=_SEQ_LEN)
 
@@ -51,20 +51,14 @@ def test_debugmodel_mixes_every_layer_type() -> None:
     assert len(layers) % 4 == 0
     for layer_id, layer in enumerate(layers):
         kind = layer_id % 4
-        attention = layer.attention
-        if kind in (0, 2):
-            assert isinstance(attention, GQAttention.Config)
-        else:
-            assert isinstance(attention, MLAttention.Config)
-            assert (attention.q_lora_rank > 0) == (kind == 3)
+        assert isinstance(layer.attention, GQAttention.Config)
         assert (layer.feed_forward is not None) == (kind in (0, 3))
         assert (layer.moe is not None) == (kind in (1, 2))
         if kind == 1:
             assert layer.moe.shared_experts is None
-            assert not isinstance(layer.moe.router, DeepSeekV3Router.Config)
+            assert layer.moe.router.aux_loss is None
         if kind == 2:
             assert layer.moe.shared_experts is not None
-            assert isinstance(layer.moe.router, DeepSeekV3Router.Config)
             assert layer.moe.router.aux_loss is not None
 
 
