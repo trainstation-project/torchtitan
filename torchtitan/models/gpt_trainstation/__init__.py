@@ -55,6 +55,7 @@ from .model import GptTrainstationModel, GptTrainstationTransformerBlock
 
 __all__ = [
     "GptTrainstationModel",
+    "MuPConfig",
     "GptTrainstationTransformerBlock",
     "gpt_trainstation_configs",
     "model_registry",

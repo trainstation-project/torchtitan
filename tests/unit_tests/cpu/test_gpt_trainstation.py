@@ -15,7 +15,6 @@ from torchtitan.models.gpt_trainstation import gpt_trainstation_configs, MuPConf
 from torchtitan.models.gpt_trainstation.config_registry import (
     dist_muon_optimizer,
     gpt_trainstation_debugmodel,
-    gpt_trainstation_debugmodel_mup,
     mup_adamw_optimizer,
 )
 
@@ -41,9 +40,17 @@ class _CausalAttention(nn.Module):
         return out_HTV.transpose(0, 1)
 
 
-def _debug_config(mup: MuPConfig | None = None):
+def _debug_config(**kwargs):
     build_config, _ = gpt_trainstation_configs["debugmodel"]
-    return build_config("flex", seq_len=_SEQ_LEN)
+    return build_config("flex", seq_len=_SEQ_LEN, **kwargs)
+
+
+def _build_for_cpu(config):
+    model = config.build()
+    model.init_states()
+    for layer in model.layers.values():
+        layer.attention.inner_attention = _CausalAttention()
+    return model
 
 
 def test_debugmodel_mixes_every_layer_type() -> None:
@@ -133,3 +140,99 @@ def test_dist_muon_covers_every_matrix() -> None:
         dist_muon_optimizer(
             trainer_config.model_spec, lr=1e-3, parallelism=trainer_config.parallelism
         )
+
+
+def test_mup_multipliers() -> None:
+    """Embedding, residual and logit multipliers match an explicit rescaling of
+    the same weights without muP."""
+    mup = MuPConfig(m_width=4.0, m_emb=3.0, m_residual=0.5)
+    torch.manual_seed(0)
+    mup_model = _build_for_cpu(_debug_config(mup=mup))
+    torch.manual_seed(0)
+    plain_model = _build_for_cpu(_debug_config(mup=None))
+    plain_model.load_state_dict(mup_model.state_dict())
+    mup_model.eval()
+    plain_model.eval()
+
+    # Fold the multipliers into weights: m_emb into the embedding table, and
+    # m_residual into every branch's output projection, so the residual
+    # stream of the plain model equals that of the muP model.
+    with torch.no_grad():
+        plain_model.tok_embeddings.weight.mul_(mup.m_emb)
+        for layer in plain_model.layers.values():
+            layer.attention.wo.weight.mul_(mup.m_residual)
+            ffn = layer.moe if layer.moe_enabled else layer.feed_forward
+            for name, param in ffn.named_parameters():
+                if name.endswith(("w2.weight", "w2_EDF")):
+                    param.mul_(mup.m_residual)
+    # RMSNorm before lm_head removes the residual-stream scale, so the
+    # remaining difference is exactly the 1 / m_width logit multiplier.
+    tokens = torch.randint(0, mup_model.lm_head.weight.shape[0], (_SEQ_LEN,))
+    positions = torch.arange(_SEQ_LEN)
+    AuxLoss.set_step_denominator(torch.tensor(float(_SEQ_LEN), dtype=torch.float64))
+    with torch.no_grad():
+        mup_logits = mup_model(tokens, positions, None)
+        plain_logits = plain_model(tokens, positions, None)
+    torch.testing.assert_close(mup_logits * mup.m_width, plain_logits)
+
+
+def test_mup_init_std() -> None:
+    mup = MuPConfig(m_width=4.0)
+    config = _debug_config(mup=mup)
+    torch.manual_seed(0)
+    model = config.build()
+    model.init_states()
+    n_layers = len(config.layers)
+    hidden_std = 0.02 / 4.0**0.5
+    layer = model.layers["0"]
+    assert torch.std(layer.attention.qkv_linear.wqkv.weight).item() == pytest.approx(
+        hidden_std, rel=0.05
+    )
+    assert torch.std(layer.attention.wo.weight).item() == pytest.approx(
+        hidden_std / (2 * n_layers) ** 0.5, rel=0.05
+    )
+    assert torch.std(model.tok_embeddings.weight).item() == pytest.approx(
+        0.02, rel=0.05
+    )
+    assert torch.std(model.lm_head.weight).item() == pytest.approx(0.02, rel=0.05)
+
+
+def test_mup_forward_backward() -> None:
+    torch.manual_seed(0)
+    model_spec = gpt_trainstation_debugmodel(seq_len=_SEQ_LEN).model_spec
+    config = model_spec.model
+    model = _build_for_cpu(config)
+    tokens = torch.randint(0, config.vocab_size, (_SEQ_LEN,))
+    AuxLoss.set_step_denominator(torch.tensor(float(_SEQ_LEN), dtype=torch.float64))
+    logits = model(tokens, torch.arange(_SEQ_LEN), None)
+    logits.float().logsumexp(-1).mean().backward()
+    for name, param in model.named_parameters():
+        assert param.grad is not None, name
+
+
+def test_mup_param_groups() -> None:
+    """Embedding, LM head and norms train at lr; everything else at lr / m_width."""
+    import re
+
+    model_spec = gpt_trainstation_debugmodel(seq_len=_SEQ_LEN).model_spec
+    m_width = model_spec.model.m_width
+    optimizer = mup_adamw_optimizer(model_spec, lr=1.0)
+    full_lr, hidden_lr = optimizer.param_groups
+    assert full_lr.optimizer_kwargs["lr"] == 1.0
+    assert hidden_lr.optimizer_kwargs["lr"] == 1.0 / m_width
+
+    model = model_spec.model.build()
+    full_lr_names = {
+        name for name, _ in model.named_parameters() if re.search(full_lr.pattern, name)
+    }
+    expected = {
+        name
+        for name, param in model.named_parameters()
+        if name.startswith(("tok_embeddings.", "lm_head."))
+        or (param.ndim == 1 and "norm" in name)
+    }
+    assert full_lr_names == expected
+
+    model_spec.model.m_width = None
+    with pytest.raises(ValueError, match="muP"):
+        mup_adamw_optimizer(model_spec, lr=1.0)
