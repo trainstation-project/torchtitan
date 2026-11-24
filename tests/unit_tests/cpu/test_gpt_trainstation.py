@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.gpt_trainstation import gpt_trainstation_configs, MuPConfig
+from torchtitan.models.gpt_trainstation import gpt_trainstation_configs
 from torchtitan.models.gpt_trainstation.config_registry import (
     dist_muon_optimizer,
     gpt_trainstation_debugmodel,
@@ -40,9 +40,9 @@ class _CausalAttention(nn.Module):
         return out_HTV.transpose(0, 1)
 
 
-def _debug_config(**kwargs):
+def _debug_config():
     build_config, _ = gpt_trainstation_configs["debugmodel"]
-    return build_config("flex", seq_len=_SEQ_LEN, **kwargs)
+    return build_config("flex", seq_len=_SEQ_LEN)
 
 
 def _build_for_cpu(config):
@@ -145,51 +145,53 @@ def test_dist_muon_covers_every_matrix() -> None:
 def test_mup_multipliers() -> None:
     """Embedding, residual and logit multipliers match an explicit rescaling of
     the same weights without muP."""
-    mup = MuPConfig(m_width=4.0, m_emb=3.0, m_residual=0.5)
+    mup_config = _debug_config()
+    m_residual = mup_config.layers[0].m_residual
+    plain_config = _debug_config()
+    plain_config.m_emb = plain_config.m_width = None
+    for layer in plain_config.layers:
+        layer.m_residual = None
+
     torch.manual_seed(0)
-    mup_model = _build_for_cpu(_debug_config(mup=mup))
-    torch.manual_seed(0)
-    plain_model = _build_for_cpu(_debug_config(mup=None))
+    mup_model = _build_for_cpu(mup_config)
+    plain_model = _build_for_cpu(plain_config)
     plain_model.load_state_dict(mup_model.state_dict())
     mup_model.eval()
     plain_model.eval()
 
-    # Fold the multipliers into weights: m_emb into the embedding table, and
-    # m_residual into every branch's output projection, so the residual
-    # stream of the plain model equals that of the muP model.
+    # Fold m_emb into the embedding table and m_residual into every branch's
+    # output projection, so both models carry the same residual stream.
     with torch.no_grad():
-        plain_model.tok_embeddings.weight.mul_(mup.m_emb)
+        plain_model.tok_embeddings.weight.mul_(mup_config.m_emb)
         for layer in plain_model.layers.values():
-            layer.attention.wo.weight.mul_(mup.m_residual)
+            layer.attention.wo.weight.mul_(m_residual)
             ffn = layer.moe if layer.moe_enabled else layer.feed_forward
             for name, param in ffn.named_parameters():
                 if name.endswith(("w2.weight", "w2_EDF")):
-                    param.mul_(mup.m_residual)
+                    param.mul_(m_residual)
     # RMSNorm before lm_head removes the residual-stream scale, so the
     # remaining difference is exactly the 1 / m_width logit multiplier.
-    tokens = torch.randint(0, mup_model.lm_head.weight.shape[0], (_SEQ_LEN,))
+    tokens = torch.randint(0, mup_config.vocab_size, (_SEQ_LEN,))
     positions = torch.arange(_SEQ_LEN)
     AuxLoss.set_step_denominator(torch.tensor(float(_SEQ_LEN), dtype=torch.float64))
     with torch.no_grad():
         mup_logits = mup_model(tokens, positions, None)
         plain_logits = plain_model(tokens, positions, None)
-    torch.testing.assert_close(mup_logits * mup.m_width, plain_logits)
+    torch.testing.assert_close(mup_logits * mup_config.m_width, plain_logits)
 
 
 def test_mup_init_std() -> None:
-    mup = MuPConfig(m_width=4.0)
-    config = _debug_config(mup=mup)
+    config = _debug_config()
     torch.manual_seed(0)
     model = config.build()
     model.init_states()
-    n_layers = len(config.layers)
-    hidden_std = 0.02 / 4.0**0.5
+    hidden_std = 0.02 / config.m_width**0.5
     layer = model.layers["0"]
     assert torch.std(layer.attention.qkv_linear.wqkv.weight).item() == pytest.approx(
         hidden_std, rel=0.05
     )
     assert torch.std(layer.attention.wo.weight).item() == pytest.approx(
-        hidden_std / (2 * n_layers) ** 0.5, rel=0.05
+        hidden_std / 2**0.5, rel=0.05
     )
     assert torch.std(model.tok_embeddings.weight).item() == pytest.approx(
         0.02, rel=0.05

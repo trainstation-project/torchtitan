@@ -130,3 +130,42 @@ class GptTrainstationModel(Decoder):
                     seq_len=seq_len,
                 )
             return nparams, 6 * active_nparams + attention_op_flops
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.m_emb = config.m_emb
+        self.m_width = config.m_width
+        if self.m_width is not None and config.lm_head.bias:
+            # The logit multiplier is applied to the lm_head input (see
+            # forward), which only equals scaling the logits without a bias.
+            raise ValueError("muP m_width requires an lm_head without bias.")
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_masks: AttentionMasksType | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
+    ):
+        # Same as Decoder.forward plus the muP embedding and logit multipliers.
+        if self.tok_embeddings is not None:
+            h = self.tok_embeddings(tokens)
+            if self.m_emb is not None:
+                h = h * self.m_emb
+        else:
+            h = tokens
+
+        for layer in self.layers.values():
+            h = layer(h, attention_masks, positions, padding_mask=padding_mask)
+
+        h = self.norm(h) if self.norm is not None else h
+
+        # Scale the lm_head input rather than the logits so the multiplier also
+        # applies when ChunkedLossWrapper runs lm_head itself (_skip_lm_head).
+        if self.m_width is not None and self.lm_head is not None:
+            h = h * (1 / self.m_width)
+
+        if self._skip_lm_head:
+            return h
+        return self.lm_head(h) if self.lm_head is not None else h

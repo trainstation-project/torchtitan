@@ -62,24 +62,52 @@ __all__ = [
 ]
 
 
-_LINEAR_INIT: dict[str, Callable] = {
-    "weight": partial(nn.init.trunc_normal_, std=0.02),
-    "bias": nn.init.zeros_,
-}
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=0.02)}
 _EPS = 1e-6
 
 
+@dataclass(kw_only=True, slots=True)
+class MuPConfig:
+    """muP multipliers, following lm-engine.
+
+    Token embeddings are scaled by ``m_emb``, each residual branch by
+    ``m_residual``, and logits by ``1 / m_width`` (``m_width = dim / base_dim``).
+    Hidden matrices init with std ``0.02 / sqrt(m_width)`` and train at
+    ``lr / m_width`` (see ``config_registry.mup_adamw_optimizer``).
+    """
+
+    m_width: float
+    m_emb: float | None = None
+    m_residual: float | None = None
+
+
+# Arbitrary (untuned) values; the debug model only needs muP exercised.
+_DEBUG_MUP = MuPConfig(m_width=2.0, m_emb=12.0, m_residual=0.22)
+
+# Hidden matrices; the embedding and LM head keep std 0.02.
+_HIDDEN_STD = 0.02 / math.sqrt(_DEBUG_MUP.m_width)
+_LINEAR_INIT: dict[str, Callable] = {
+    "weight": partial(nn.init.trunc_normal_, std=_HIDDEN_STD),
+    "bias": nn.init.zeros_,
+}
+_LM_HEAD_INIT: dict[str, Callable] = {
+    "weight": partial(nn.init.trunc_normal_, std=0.02),
+    "bias": nn.init.zeros_,
+}
+
+
 def _depth_init(layer_id: int) -> dict[str, Callable]:
     return {
-        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "weight": partial(
+            nn.init.trunc_normal_, std=depth_scaled_std(_HIDDEN_STD, layer_id)
+        ),
         "bias": nn.init.zeros_,
     }
 
 
 def _experts_init(layer_id: int) -> dict[str, Callable]:
-    depth_init = partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id))
+    depth_init = _depth_init(layer_id)["weight"]
     return {
         "w1_EFD": _LINEAR_INIT["weight"],
         "w2_EDF": depth_init,
@@ -98,7 +126,7 @@ def _moe(
     hidden_dim: int,
     num_experts: int,
     top_k: int,
-    deepseek_style: bool,
+    with_shared_experts: bool,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
 ) -> MoE.Config:
@@ -111,7 +139,7 @@ def _moe(
     router = make_router_config(
         dim=dim,
         num_experts=num_experts,
-        gate_param_init=hidden_init,
+        gate_param_init=_LINEAR_INIT,
         top_k=top_k,
         score_func=Sigmoid.Config() if with_shared_experts else Softmax.Config(),
         route_norm=True,
@@ -135,10 +163,10 @@ def _moe(
                 w1_param_init=_LINEAR_INIT,
                 w2w3_param_init=_depth_init(layer_id),
             )
-            if deepseek_style
+            if with_shared_experts
             else None
         ),
-        aux_loss_coeff=1e-3 if deepseek_style else None,
+        aux_loss_coeff=1e-3 if with_shared_experts else None,
     )
 
 
@@ -153,60 +181,29 @@ def _debugmodel(
     n_layers = 8
     vocab_size = 2048
     n_heads = 16
-    gqa_head_dim = 64
-    mla_rope_dim = 32
+    head_dim = 64
     dense_hidden_dim = 768
     moe_hidden_dim = 256
     num_experts = 8
     top_k = 2
 
     inner_attention = get_attention_config(attn_backend)
-    gqa_rope = CosSinRoPE.Config(
-        dim=gqa_head_dim, max_context_length=seq_len, theta=1000000.0
-    )
-    mla_rope = ComplexRoPE.Config(
-        dim=mla_rope_dim,
-        max_context_length=seq_len,
-        theta=10000.0,
-        scaling="yarn",
-        rope_factor=40.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=4096,
-    )
+    rope = CosSinRoPE.Config(dim=head_dim, max_context_length=seq_len, theta=1000000.0)
 
     layers = []
     for layer_id in range(n_layers):
         kind = layer_id % 4
-        if kind in (0, 2):
-            attention = make_gqa_config(
-                dim=dim,
-                n_heads=n_heads,
-                n_kv_heads=8,
-                head_dim=gqa_head_dim,
-                wqkv_param_init=_LINEAR_INIT,
-                wo_param_init=_depth_init(layer_id),
-                inner_attention=inner_attention,
-                rope=gqa_rope,
-                qk_norm=_norm(gqa_head_dim),
-            )
-        else:
-            attention = make_mla_attention_config(
-                layer_id=layer_id,
-                dim=dim,
-                n_heads=n_heads,
-                q_lora_rank=0 if kind == 1 else 128,
-                kv_lora_rank=128,
-                qk_nope_head_dim=64,
-                qk_rope_head_dim=mla_rope_dim,
-                v_head_dim=64,
-                mscale=0.70,
-                attn_backend=attn_backend,
-                linear_init=_LINEAR_INIT,
-                norm_init=_NORM_INIT,
-                depth_init=_depth_init,
-                rope=mla_rope,
-            )
+        attention = make_gqa_config(
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=8,
+            head_dim=head_dim,
+            wqkv_param_init=_LINEAR_INIT,
+            wo_param_init=_depth_init(layer_id),
+            inner_attention=inner_attention,
+            rope=rope,
+            qk_norm=_norm(head_dim),
+        )
 
         if kind in (0, 3):
             feed_forward = make_ffn_config(
@@ -224,7 +221,7 @@ def _debugmodel(
                 hidden_dim=moe_hidden_dim,
                 num_experts=num_experts,
                 top_k=top_k,
-                deepseek_style=kind == 2,
+                with_shared_experts=kind == 2,
                 moe_comm_backend=moe_comm_backend,
                 non_blocking_capacity_factor=non_blocking_capacity_factor,
             )
@@ -236,7 +233,7 @@ def _debugmodel(
                 ffn_norm=_norm(dim),
                 feed_forward=feed_forward,
                 moe=moe,
-                m_residual=None if mup is None else mup.m_residual,
+                m_residual=_DEBUG_MUP.m_residual,
             )
         )
 
@@ -248,11 +245,11 @@ def _debugmodel(
         ),
         norm=_norm(dim),
         lm_head=Linear.Config(
-            in_features=dim, out_features=vocab_size, param_init=_LINEAR_INIT
+            in_features=dim, out_features=vocab_size, param_init=_LM_HEAD_INIT
         ),
         layers=layers,
-        m_emb=None if mup is None else mup.m_emb,
-        m_width=None if mup is None else mup.m_width,
+        m_emb=_DEBUG_MUP.m_emb,
+        m_width=_DEBUG_MUP.m_width,
     )
 
 
@@ -275,7 +272,6 @@ def model_registry(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
-    mup: MuPConfig | None = None,
 ) -> ModelSpec:
     get_config, max_context_len = gpt_trainstation_configs[flavor]
     context_len = seq_len or max_context_len
@@ -289,7 +285,6 @@ def model_registry(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         seq_len=context_len,
-        mup=mup,
     )
     if converters is not None:
         validate_converter_compatibility(converters)

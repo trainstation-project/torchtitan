@@ -12,7 +12,6 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import (
-    default_adamw,
     LRSchedulersContainer,
     OptimizersContainer,
     ParamGroupConfig,
@@ -31,7 +30,7 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
-from . import model_registry, MuPConfig
+from . import model_registry
 from .model import GptTrainstationModel
 
 
@@ -52,7 +51,7 @@ def gpt_trainstation_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=mup_adamw_optimizer(model_spec, lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -85,6 +84,47 @@ def gpt_trainstation_debugmodel_varlen(
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     config.dataloader.max_num_documents = 64
     return config
+
+
+def mup_adamw_optimizer(
+    model_spec: ModelSpec,
+    *,
+    lr: float,
+    weight_decay: float = 0.1,
+) -> OptimizersContainer.Config:
+    """AdamW with muP per-parameter learning rates, following lm-engine.
+
+    Token embedding, LM head and norm weights train at ``lr``; every other
+    (hidden) parameter trains at ``lr / m_width``. Unlike lm-engine, norms keep
+    weight decay: a separate no-decay group would match no parameters on PP
+    stages without norms, and torchtitan rejects empty groups.
+    """
+    model_config = cast(GptTrainstationModel.Config, model_spec.model)
+    if model_config.m_width is None:
+        raise ValueError("mup_adamw_optimizer requires a model built with muP.")
+
+    def adamw(group_lr: float) -> dict:
+        return {
+            "lr": group_lr,
+            "betas": (0.9, 0.95),
+            "eps": 1e-8,
+            "weight_decay": weight_decay,
+        }
+
+    return OptimizersContainer.Config(
+        param_groups=[
+            ParamGroupConfig(
+                pattern=r"(?:^|\.)(?:tok_embeddings|lm_head|\w*norm)\.weight$",
+                optimizer_name="AdamW",
+                optimizer_kwargs=adamw(lr),
+            ),
+            ParamGroupConfig(
+                pattern=r".*",
+                optimizer_name="AdamW",
+                optimizer_kwargs=adamw(lr / model_config.m_width),
+            ),
+        ],
+    )
 
 
 def _routed_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
