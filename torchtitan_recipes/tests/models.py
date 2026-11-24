@@ -431,23 +431,6 @@ def gpt_trainstation_debugmodel_dist_muon_fsdp2_pp2_ep2() -> Trainer.Config:
     return config
 
 
-def gpt_trainstation_debugmodel_mup_fsdp2_pp2_ep2() -> Trainer.Config:
-    """muP with PP: the first stage owns the embedding multiplier, the last
-    stage the logit multiplier, and each stage builds its own lr groups."""
-    from torchtitan.models.gpt_trainstation.config_registry import (
-        gpt_trainstation_debugmodel_mup,
-    )
-
-    config = gpt_trainstation_debugmodel_mup(seq_len=512)
-    _set_spmd_typechecking(config, typechecking=False)
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.expert_parallel_degree = 2
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.pipeline_parallel_schedule = "1F1B"
-    config.parallelism.num_pp_microbatches = 2
-    return config
-
-
 def gpt_trainstation_debugmodel_dist_muon_fsdp8_ep8() -> Trainer.Config:
     return _gpt_trainstation_dist_muon(
         data_parallel_shard_degree=8, expert_parallel_degree=8

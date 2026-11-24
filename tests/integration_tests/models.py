@@ -217,13 +217,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
-            configs=[recipes.gpt_trainstation_debugmodel_mup_fsdp2_pp2_ep2],
-            test_descr="GptTrainstation muP PP+FSDP+EP",
-            test_name="gpt_trainstation_mup_pp+fsdp+ep",
-            ngpu=4,
-            use_real_pg=True,
-        ),
-        OverrideDefinitions(
             configs=[recipes.gpt_trainstation_debugmodel_dist_muon_fsdp8_ep8],
             test_descr="GptTrainstation DistMuon FSDP+EP",
             test_name="gpt_trainstation_dist_muon_fsdp+ep",

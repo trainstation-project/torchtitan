@@ -40,7 +40,6 @@ from torchtitan.models.deepseek_v4.config_registry import (
 )
 from torchtitan.models.gpt_trainstation.config_registry import (
     gpt_trainstation_debugmodel,
-    gpt_trainstation_debugmodel_mup,
     gpt_trainstation_debugmodel_varlen,
 )
 from torchtitan.models.llama3.config_registry import (
@@ -77,7 +76,6 @@ _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     deepseek_v4_debugmodel,
     deepseek_v4_mtp_debugmodel,
     gpt_trainstation_debugmodel,
-    gpt_trainstation_debugmodel_mup,
     gpt_trainstation_debugmodel_varlen,
     llama3_debugmodel,
     llama3_debugmodel_ce_loss,

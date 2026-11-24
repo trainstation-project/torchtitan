@@ -85,7 +85,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         spmd.assert_local_type_like(
             result,
             logits,
-            {tp_group: spmd.I},  # pyrefly: ignore [bad-argument-type]
+            {tp_group: spmd.I},
         )
 
     @staticmethod
@@ -618,8 +618,8 @@ class ChunkedLossWrapper(BaseLoss):
                     logits = logits[0]
                     label_chunks = label_chunks[0]
                 chunk_loss, chunk_metrics = self.loss_fn(
-                    logits,  # pyrefly: ignore[bad-argument-type]
-                    label_chunks,  # pyrefly: ignore[bad-argument-type]
+                    logits,
+                    label_chunks,
                     global_valid_tokens,
                     **loss_inputs,
                 )

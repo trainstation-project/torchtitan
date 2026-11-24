@@ -79,7 +79,7 @@ def parallelize_qwen3_5(
         )
         if model.vision_encoder is not None:
             apply_compile(
-                model.vision_encoder,  # pyrefly: ignore [bad-argument-type]
+                model.vision_encoder,
                 compile_config=compile_config,
                 parallel_dims=parallel_dims,
             )
@@ -93,7 +93,7 @@ def parallelize_qwen3_5(
 
     if model.vision_encoder is not None:
         apply_fsdp_to_vision_encoder(
-            model.vision_encoder,  # pyrefly: ignore [bad-argument-type]
+            model.vision_encoder,
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],

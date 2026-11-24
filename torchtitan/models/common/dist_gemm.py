@@ -110,7 +110,7 @@ class AsyncAllGatherLinear(torch.autograd.Function):
         spmd.assert_local_type_like(
             result,
             x_shard_m,
-            {group_name: spmd.S(1)},  # pyrefly: ignore [bad-argument-type]
+            {group_name: spmd.S(1)},
         )
 
     @staticmethod
@@ -209,7 +209,7 @@ class AsyncLinearReduceScatter(torch.autograd.Function):
         spmd.assert_local_type_like(
             result,
             x_shard_k,
-            {group_name: spmd.S(0)},  # pyrefly: ignore [bad-argument-type]
+            {group_name: spmd.S(0)},
         )
 
     @staticmethod

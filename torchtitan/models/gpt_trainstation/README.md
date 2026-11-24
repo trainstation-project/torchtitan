@@ -30,4 +30,6 @@ with std `0.02 / sqrt(m_width)` (output projections further divided by
 residual branch by `m_residual`, and the logits by `1 / m_width`. Pair it with
 `config_registry.mup_adamw_optimizer`, which trains hidden matrices at
 `lr / m_width` and the embedding, LM head and norms at `lr`.
-`config_registry.gpt_trainstation_debugmodel_mup` wires both together.
+The `debugmodel` flavor enables muP with arbitrary (untuned) values
+`m_width=2.0, m_emb=12.0, m_residual=0.22`, and every `debugmodel` trainer
+config uses `mup_adamw_optimizer`.

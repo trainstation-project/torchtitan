@@ -112,12 +112,10 @@ def apply_fsdp(
         model.txt_in,
     ]
     for layer in linear_layers:
-        # pyrefly: ignore [no-matching-overload]
         fully_shard(layer, **fsdp_config)
 
     # pyrefly: ignore [not-iterable]
     for block in model.double_blocks:
-        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             block,
             **fsdp_config,
@@ -125,14 +123,12 @@ def apply_fsdp(
 
     # pyrefly: ignore [not-iterable]
     for block in model.single_blocks:
-        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             block,
             **fsdp_config,
         )
 
     # apply FSDP to last layer. Set reshard_after_forward=False for last layer to avoid gather right after reshard
-    # pyrefly: ignore [no-matching-overload]
     fully_shard(model.final_layer, **fsdp_config, reshard_after_forward=False)
 
     # Wrap all the rest of model
@@ -151,12 +147,10 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     """
     # pyrefly: ignore [not-iterable]
     for block in model.double_blocks:
-        # pyrefly: ignore [missing-attribute]
         block.compile(backend=compile_config.backend, fullgraph=True)
 
     # pyrefly: ignore [not-iterable]
     for block in model.single_blocks:
-        # pyrefly: ignore [missing-attribute]
         block.compile(backend=compile_config.backend, fullgraph=True)
 
     logger.info(
@@ -167,16 +161,12 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
 def apply_ac(model: nn.Module):
     """Apply full activation checkpointing to the Flux double/single blocks."""
 
-    # pyrefly: ignore [missing-attribute]
     for layer_id, block in model.double_blocks.named_children():
         block = ptd_checkpoint_wrapper(block, preserve_rng_state=True)
-        # pyrefly: ignore [missing-attribute]
         model.double_blocks.register_module(layer_id, block)
 
-    # pyrefly: ignore [missing-attribute]
     for layer_id, block in model.single_blocks.named_children():
         block = ptd_checkpoint_wrapper(block, preserve_rng_state=True)
-        # pyrefly: ignore [missing-attribute]
         model.single_blocks.register_module(layer_id, block)
 
     logger.info("Applied full activation checkpointing to the model")

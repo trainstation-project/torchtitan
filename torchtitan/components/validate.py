@@ -223,10 +223,10 @@ class Validator(BaseValidator):
                         parallelism=self.parallelism,
                     )
                     if self.pp_has_first_stage:
-                        arg_mbs.append((inputs,))  # pyrefly: ignore[bad-argument-type]
+                        arg_mbs.append((inputs,))
                     kwarg_mbs.append(extra_kwargs)
                     if target_mbs is not None:
-                        target_mbs.append(labels)  # pyrefly: ignore[bad-argument-type]
+                        target_mbs.append(labels)
 
                 with self.validation_context():
                     losses = [] if self.pp_has_last_stage else None
