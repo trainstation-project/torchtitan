@@ -46,8 +46,8 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.qwen3.parallelize import parallelize_qwen3
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -84,34 +84,42 @@ class MuPConfig:
 
 # Arbitrary (untuned) values; the debug model only needs muP exercised.
 _DEBUG_MUP = MuPConfig(m_width=2.0, m_emb=12.0, m_residual=0.22)
-
-# Hidden matrices; the embedding and LM head keep std 0.02.
 _HIDDEN_STD = 0.02 / math.sqrt(_DEBUG_MUP.m_width)
-_LINEAR_INIT: dict[str, Callable] = {
-    "weight": partial(nn.init.trunc_normal_, std=_HIDDEN_STD),
-    "bias": nn.init.zeros_,
-}
-_LM_HEAD_INIT: dict[str, Callable] = {
-    "weight": partial(nn.init.trunc_normal_, std=0.02),
-    "bias": nn.init.zeros_,
-}
 
 
-def _depth_init(layer_id: int) -> dict[str, Callable]:
-    return {
-        "weight": partial(
-            nn.init.trunc_normal_, std=depth_scaled_std(_HIDDEN_STD, layer_id)
-        ),
-        "bias": nn.init.zeros_,
-    }
+def _normal_init(std: float) -> dict[str, Callable]:
+    return {"weight": partial(nn.init.normal_, std=std), "bias": nn.init.zeros_}
 
 
-def _experts_init(layer_id: int) -> dict[str, Callable]:
-    depth_init = _depth_init(layer_id)["weight"]
+_LINEAR_INIT = _normal_init(_HIDDEN_STD)
+_LM_HEAD_INIT = _normal_init(0.02)
+
+
+def _out_proj_init(num_layers: int) -> dict[str, Callable]:
+    """lm-engine depth-scaled init for output projections (attention ``wo`` and
+    FFN / expert down projections): ``_HIDDEN_STD / sqrt(2 * num_layers)``."""
+    return _normal_init(_HIDDEN_STD / math.sqrt(2 * num_layers))
+
+
+def _ffn(
+    *, dim: int, hidden_dim: int, out_proj_init: dict[str, Callable]
+) -> FeedForward.Config:
+    # make_ffn_config ties the up (w3) init to w2; lm-engine inits up like gate.
+    ffn = make_ffn_config(
+        dim=dim,
+        hidden_dim=hidden_dim,
+        w1_param_init=_LINEAR_INIT,
+        w2w3_param_init=_LINEAR_INIT,
+    )
+    ffn.w2.param_init = out_proj_init
+    return ffn
+
+
+def _experts_init(out_proj_init: dict[str, Callable]) -> dict[str, Callable]:
     return {
         "w1_EFD": _LINEAR_INIT["weight"],
-        "w2_EDF": depth_init,
-        "w3_EFD": depth_init,
+        "w2_EDF": out_proj_init["weight"],
+        "w3_EFD": _LINEAR_INIT["weight"],
     }
 
 
@@ -121,12 +129,12 @@ def _norm(dim: int) -> RMSNorm.Config:
 
 def _moe(
     *,
-    layer_id: int,
     dim: int,
     hidden_dim: int,
     num_experts: int,
     top_k: int,
     with_shared_experts: bool,
+    out_proj_init: dict[str, Callable],
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
 ) -> MoE.Config:
@@ -152,17 +160,12 @@ def _moe(
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             top_k=top_k,
-            param_init=_experts_init(layer_id),
+            param_init=_experts_init(out_proj_init),
             comm_backend=moe_comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
         shared_experts=(
-            make_ffn_config(
-                dim=dim,
-                hidden_dim=hidden_dim,
-                w1_param_init=_LINEAR_INIT,
-                w2w3_param_init=_depth_init(layer_id),
-            )
+            _ffn(dim=dim, hidden_dim=hidden_dim, out_proj_init=out_proj_init)
             if with_shared_experts
             else None
         ),
@@ -189,6 +192,7 @@ def _debugmodel(
 
     inner_attention = get_attention_config(attn_backend)
     rope = CosSinRoPE.Config(dim=head_dim, max_context_length=seq_len, theta=1000000.0)
+    out_proj_init = _out_proj_init(n_layers)
 
     layers = []
     for layer_id in range(n_layers):
@@ -199,29 +203,26 @@ def _debugmodel(
             n_kv_heads=8,
             head_dim=head_dim,
             wqkv_param_init=_LINEAR_INIT,
-            wo_param_init=_depth_init(layer_id),
+            wo_param_init=out_proj_init,
             inner_attention=inner_attention,
             rope=rope,
             qk_norm=_norm(head_dim),
         )
 
         if kind in (0, 3):
-            feed_forward = make_ffn_config(
-                dim=dim,
-                hidden_dim=dense_hidden_dim,
-                w1_param_init=_LINEAR_INIT,
-                w2w3_param_init=_depth_init(layer_id),
+            feed_forward = _ffn(
+                dim=dim, hidden_dim=dense_hidden_dim, out_proj_init=out_proj_init
             )
             moe = None
         else:
             feed_forward = None
             moe = _moe(
-                layer_id=layer_id,
                 dim=dim,
                 hidden_dim=moe_hidden_dim,
                 num_experts=num_experts,
                 top_k=top_k,
                 with_shared_experts=kind == 2,
+                out_proj_init=out_proj_init,
                 moe_comm_backend=moe_comm_backend,
                 non_blocking_capacity_factor=non_blocking_capacity_factor,
             )
