@@ -92,36 +92,42 @@ def mup_adamw_optimizer(
     lr: float,
     weight_decay: float = 0.1,
 ) -> OptimizersContainer.Config:
-    """AdamW with muP per-parameter learning rates, following lm-engine.
+    """AdamW with muP param groups, matching lm-engine's ``param-groups/mup.yml``.
 
-    Token embedding, LM head and norm weights train at ``lr``; every other
-    (hidden) parameter trains at ``lr / m_width``. Unlike lm-engine, norms keep
-    weight decay: a separate no-decay group would match no parameters on PP
-    stages without norms, and torchtitan rejects empty groups.
+    - Norm weights and biases: ``lr``, no weight decay.
+    - Token embedding and LM head: ``lr``.
+    - Everything else (hidden matrices): ``lr / m_width``.
     """
     model_config = cast(GptTrainstationModel.Config, model_spec.model)
     if model_config.m_width is None:
         raise ValueError("mup_adamw_optimizer requires a model built with muP.")
 
-    def adamw(group_lr: float) -> dict:
+    def adamw(group_lr: float, group_weight_decay: float) -> dict:
         return {
             "lr": group_lr,
             "betas": (0.9, 0.95),
             "eps": 1e-8,
-            "weight_decay": weight_decay,
+            "weight_decay": group_weight_decay,
         }
 
     return OptimizersContainer.Config(
         param_groups=[
             ParamGroupConfig(
-                pattern=r"(?:^|\.)(?:tok_embeddings|lm_head|\w*norm)\.weight$",
+                pattern=r"(?:norm\.weight|\.bias)$",
                 optimizer_name="AdamW",
-                optimizer_kwargs=adamw(lr),
+                optimizer_kwargs=adamw(lr, 0.0),
+            ),
+            ParamGroupConfig(
+                pattern=r"(?:^|\.)(?:tok_embeddings|lm_head)\.weight$",
+                optimizer_name="AdamW",
+                optimizer_kwargs=adamw(lr, weight_decay),
+                # Middle pipeline stages hold neither.
+                allow_empty=True,
             ),
             ParamGroupConfig(
                 pattern=r".*",
                 optimizer_name="AdamW",
-                optimizer_kwargs=adamw(lr / model_config.m_width),
+                optimizer_kwargs=adamw(lr / model_config.m_width, weight_decay),
             ),
         ],
     )

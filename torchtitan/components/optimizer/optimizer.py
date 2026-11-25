@@ -68,6 +68,11 @@ class ParamGroupConfig:
     """Keyword arguments passed to the optimizer constructor.
     Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
 
+    allow_empty: bool = False
+    """Skip this group instead of raising when it matches no parameters of a
+    model part. Use for patterns that legitimately match nothing on some
+    pipeline stages (e.g. embeddings or the LM head)."""
+
 
 T = TypeVar("T", bound=Optimizer)
 
@@ -205,6 +210,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     claimed.add(name)
 
             if not params:
+                if pg.allow_empty:
+                    continue
                 raise ValueError(
                     f"Optimizer param_groups pattern '{pg.pattern}' "
                     f"matched no parameters"

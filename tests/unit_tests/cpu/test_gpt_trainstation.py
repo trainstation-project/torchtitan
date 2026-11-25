@@ -181,18 +181,32 @@ def test_mup_multipliers() -> None:
 
 
 def test_mup_init_std() -> None:
+    """lm-engine init: hidden std 0.02 / sqrt(m_width), output projections
+    further divided by sqrt(2 * num_layers), embedding and LM head 0.02."""
     config = _debug_config()
     torch.manual_seed(0)
     model = config.build()
     model.init_states()
     hidden_std = 0.02 / config.m_width**0.5
-    layer = model.layers["0"]
-    assert torch.std(layer.attention.qkv_linear.wqkv.weight).item() == pytest.approx(
-        hidden_std, rel=0.05
-    )
-    assert torch.std(layer.attention.wo.weight).item() == pytest.approx(
-        hidden_std / 2**0.5, rel=0.05
-    )
+    out_std = hidden_std / (2 * len(config.layers)) ** 0.5
+    expected = {
+        "attention.qkv_linear.wqkv.weight": hidden_std,
+        "attention.wo.weight": out_std,
+        "feed_forward.w13.weight": hidden_std,
+        "feed_forward.w2.weight": out_std,
+        "moe.router.gate.weight": hidden_std,
+        "moe.routed_experts.inner_experts.w1_EFD": hidden_std,
+        "moe.routed_experts.inner_experts.w3_EFD": hidden_std,
+        "moe.routed_experts.inner_experts.w2_EDF": out_std,
+        "moe.shared_experts.w13.weight": hidden_std,
+        "moe.shared_experts.w2.weight": out_std,
+    }
+    params = dict(model.named_parameters())
+    for suffix, std in expected.items():
+        names = [n for n in params if n.endswith(suffix)]
+        assert names, suffix
+        for name in names:
+            assert torch.std(params[name]).item() == pytest.approx(std, rel=0.1), name
     assert torch.std(model.tok_embeddings.weight).item() == pytest.approx(
         0.02, rel=0.05
     )
@@ -213,27 +227,34 @@ def test_mup_forward_backward() -> None:
 
 
 def test_mup_param_groups() -> None:
-    """Embedding, LM head and norms train at lr; everything else at lr / m_width."""
+    """Matches lm-engine's mup.yml: norms at lr without weight decay, embedding
+    and LM head at lr, everything else at lr / m_width."""
     import re
 
     model_spec = gpt_trainstation_debugmodel(seq_len=_SEQ_LEN).model_spec
     m_width = model_spec.model.m_width
-    optimizer = mup_adamw_optimizer(model_spec, lr=1.0)
-    full_lr, hidden_lr = optimizer.param_groups
+    optimizer = mup_adamw_optimizer(model_spec, lr=1.0, weight_decay=0.1)
+    no_decay, full_lr, hidden_lr = optimizer.param_groups
+    assert no_decay.optimizer_kwargs["lr"] == 1.0
+    assert no_decay.optimizer_kwargs["weight_decay"] == 0.0
     assert full_lr.optimizer_kwargs["lr"] == 1.0
+    assert full_lr.optimizer_kwargs["weight_decay"] == 0.1
+    assert full_lr.allow_empty
     assert hidden_lr.optimizer_kwargs["lr"] == 1.0 / m_width
+    assert hidden_lr.optimizer_kwargs["weight_decay"] == 0.1
 
     model = model_spec.model.build()
-    full_lr_names = {
-        name for name, _ in model.named_parameters() if re.search(full_lr.pattern, name)
-    }
-    expected = {
+    names = [name for name, _ in model.named_parameters()]
+    no_decay_names = {n for n in names if re.search(no_decay.pattern, n)}
+    assert no_decay_names == {
         name
         for name, param in model.named_parameters()
-        if name.startswith(("tok_embeddings.", "lm_head."))
-        or (param.ndim == 1 and "norm" in name)
+        if param.ndim == 1 and "norm" in name
     }
-    assert full_lr_names == expected
+    full_lr_names = {
+        n for n in names if n not in no_decay_names and re.search(full_lr.pattern, n)
+    }
+    assert full_lr_names == {"tok_embeddings.weight", "lm_head.weight"}
 
     model_spec.model.m_width = None
     with pytest.raises(ValueError, match="muP"):
