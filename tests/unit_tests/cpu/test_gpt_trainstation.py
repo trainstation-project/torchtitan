@@ -40,9 +40,9 @@ class _CausalAttention(nn.Module):
         return out_HTV.transpose(0, 1)
 
 
-def _debug_config():
+def _debug_config(initializer_range: float = 0.02):
     build_config, _ = gpt_trainstation_configs["debugmodel"]
-    return build_config("flex", seq_len=_SEQ_LEN)
+    return build_config("flex", seq_len=_SEQ_LEN, initializer_range=initializer_range)
 
 
 def _build_for_cpu(config):
@@ -180,14 +180,16 @@ def test_mup_multipliers() -> None:
     torch.testing.assert_close(mup_logits * mup_config.m_width, plain_logits)
 
 
-def test_mup_init_std() -> None:
-    """lm-engine init: hidden std 0.02 / sqrt(m_width), output projections
-    further divided by sqrt(2 * num_layers), embedding and LM head 0.02."""
-    config = _debug_config()
+@pytest.mark.parametrize("initializer_range", [0.02, 0.05])
+def test_mup_init_std(initializer_range: float) -> None:
+    """lm-engine init: hidden std initializer_range / sqrt(m_width), output
+    projections further divided by sqrt(2 * num_layers), embedding and LM head
+    initializer_range."""
+    config = _debug_config(initializer_range)
     torch.manual_seed(0)
     model = config.build()
     model.init_states()
-    hidden_std = 0.02 / config.m_width**0.5
+    hidden_std = initializer_range / config.m_width**0.5
     out_std = hidden_std / (2 * len(config.layers)) ** 0.5
     expected = {
         "attention.qkv_linear.wqkv.weight": hidden_std,
@@ -208,9 +210,11 @@ def test_mup_init_std() -> None:
         for name in names:
             assert torch.std(params[name]).item() == pytest.approx(std, rel=0.1), name
     assert torch.std(model.tok_embeddings.weight).item() == pytest.approx(
-        0.02, rel=0.05
+        initializer_range, rel=0.05
     )
-    assert torch.std(model.lm_head.weight).item() == pytest.approx(0.02, rel=0.05)
+    assert torch.std(model.lm_head.weight).item() == pytest.approx(
+        initializer_range, rel=0.05
+    )
 
 
 def test_mup_forward_backward() -> None:

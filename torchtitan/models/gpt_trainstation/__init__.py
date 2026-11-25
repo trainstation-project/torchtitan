@@ -63,7 +63,6 @@ __all__ = [
 
 
 _NORM_INIT = {"weight": nn.init.ones_}
-_EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=0.02)}
 _EPS = 1e-6
 
 
@@ -73,7 +72,7 @@ class MuPConfig:
 
     Token embeddings are scaled by ``m_emb``, each residual branch by
     ``m_residual``, and logits by ``1 / m_width`` (``m_width = dim / base_dim``).
-    Hidden matrices init with std ``0.02 / sqrt(m_width)`` and train at
+    Hidden matrices init with std ``initializer_range / sqrt(m_width)`` and train at
     ``lr / m_width`` (see ``config_registry.mup_adamw_optimizer``).
     """
 
@@ -84,42 +83,37 @@ class MuPConfig:
 
 # Arbitrary (untuned) values; the debug model only needs muP exercised.
 _DEBUG_MUP = MuPConfig(m_width=2.0, m_emb=12.0, m_residual=0.22)
-_HIDDEN_STD = 0.02 / math.sqrt(_DEBUG_MUP.m_width)
 
 
 def _normal_init(std: float) -> dict[str, Callable]:
     return {"weight": partial(nn.init.normal_, std=std), "bias": nn.init.zeros_}
 
 
-_LINEAR_INIT = _normal_init(_HIDDEN_STD)
-_LM_HEAD_INIT = _normal_init(0.02)
-
-
-def _out_proj_init(num_layers: int) -> dict[str, Callable]:
-    """lm-engine depth-scaled init for output projections (attention ``wo`` and
-    FFN / expert down projections): ``_HIDDEN_STD / sqrt(2 * num_layers)``."""
-    return _normal_init(_HIDDEN_STD / math.sqrt(2 * num_layers))
-
-
 def _ffn(
-    *, dim: int, hidden_dim: int, out_proj_init: dict[str, Callable]
+    *,
+    dim: int,
+    hidden_dim: int,
+    hidden_init: dict[str, Callable],
+    out_proj_init: dict[str, Callable],
 ) -> FeedForward.Config:
     # make_ffn_config ties the up (w3) init to w2; lm-engine inits up like gate.
     ffn = make_ffn_config(
         dim=dim,
         hidden_dim=hidden_dim,
-        w1_param_init=_LINEAR_INIT,
-        w2w3_param_init=_LINEAR_INIT,
+        w1_param_init=hidden_init,
+        w2w3_param_init=hidden_init,
     )
     ffn.w2.param_init = out_proj_init
     return ffn
 
 
-def _experts_init(out_proj_init: dict[str, Callable]) -> dict[str, Callable]:
+def _experts_init(
+    hidden_init: dict[str, Callable], out_proj_init: dict[str, Callable]
+) -> dict[str, Callable]:
     return {
-        "w1_EFD": _LINEAR_INIT["weight"],
+        "w1_EFD": hidden_init["weight"],
         "w2_EDF": out_proj_init["weight"],
-        "w3_EFD": _LINEAR_INIT["weight"],
+        "w3_EFD": hidden_init["weight"],
     }
 
 
@@ -134,6 +128,7 @@ def _moe(
     num_experts: int,
     top_k: int,
     with_shared_experts: bool,
+    hidden_init: dict[str, Callable],
     out_proj_init: dict[str, Callable],
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
@@ -147,7 +142,7 @@ def _moe(
     router = make_router_config(
         dim=dim,
         num_experts=num_experts,
-        gate_param_init=_LINEAR_INIT,
+        gate_param_init=hidden_init,
         top_k=top_k,
         score_func=Sigmoid.Config() if with_shared_experts else Softmax.Config(),
         route_norm=True,
@@ -160,12 +155,17 @@ def _moe(
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             top_k=top_k,
-            param_init=_experts_init(out_proj_init),
+            param_init=_experts_init(hidden_init, out_proj_init),
             comm_backend=moe_comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
         shared_experts=(
-            _ffn(dim=dim, hidden_dim=hidden_dim, out_proj_init=out_proj_init)
+            _ffn(
+                dim=dim,
+                hidden_dim=hidden_dim,
+                hidden_init=hidden_init,
+                out_proj_init=out_proj_init,
+            )
             if with_shared_experts
             else None
         ),
@@ -179,6 +179,7 @@ def _debugmodel(
     non_blocking_capacity_factor: float | None = None,
     *,
     seq_len: int,
+    initializer_range: float,
 ) -> GptTrainstationModel.Config:
     dim = 256
     n_layers = 8
@@ -192,7 +193,13 @@ def _debugmodel(
 
     inner_attention = get_attention_config(attn_backend)
     rope = CosSinRoPE.Config(dim=head_dim, max_context_length=seq_len, theta=1000000.0)
-    out_proj_init = _out_proj_init(n_layers)
+    # lm-engine "mup" init (plain normal, not truncated): the embedding and LM
+    # head use std initializer_range, hidden matrices initializer_range /
+    # sqrt(m_width), and output projections (attention wo, FFN and expert down
+    # projections) additionally divide by sqrt(2 * n_layers).
+    hidden_std = initializer_range / math.sqrt(_DEBUG_MUP.m_width)
+    hidden_init = _normal_init(hidden_std)
+    out_proj_init = _normal_init(hidden_std / math.sqrt(2 * n_layers))
 
     layers = []
     for layer_id in range(n_layers):
@@ -202,7 +209,7 @@ def _debugmodel(
             n_heads=n_heads,
             n_kv_heads=8,
             head_dim=head_dim,
-            wqkv_param_init=_LINEAR_INIT,
+            wqkv_param_init=hidden_init,
             wo_param_init=out_proj_init,
             inner_attention=inner_attention,
             rope=rope,
@@ -211,7 +218,10 @@ def _debugmodel(
 
         if kind in (0, 3):
             feed_forward = _ffn(
-                dim=dim, hidden_dim=dense_hidden_dim, out_proj_init=out_proj_init
+                dim=dim,
+                hidden_dim=dense_hidden_dim,
+                hidden_init=hidden_init,
+                out_proj_init=out_proj_init,
             )
             moe = None
         else:
@@ -222,6 +232,7 @@ def _debugmodel(
                 num_experts=num_experts,
                 top_k=top_k,
                 with_shared_experts=kind == 2,
+                hidden_init=hidden_init,
                 out_proj_init=out_proj_init,
                 moe_comm_backend=moe_comm_backend,
                 non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -242,11 +253,15 @@ def _debugmodel(
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init={"weight": partial(nn.init.normal_, std=initializer_range)},
         ),
         norm=_norm(dim),
         lm_head=Linear.Config(
-            in_features=dim, out_features=vocab_size, param_init=_LM_HEAD_INIT
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_normal_init(initializer_range),
         ),
         layers=layers,
         m_emb=_DEBUG_MUP.m_emb,
@@ -272,6 +287,7 @@ def model_registry(
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
+    initializer_range: float = 0.02,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     get_config, max_context_len = gpt_trainstation_configs[flavor]
@@ -286,6 +302,7 @@ def model_registry(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         seq_len=context_len,
+        initializer_range=initializer_range,
     )
     if converters is not None:
         validate_converter_compatibility(converters)
