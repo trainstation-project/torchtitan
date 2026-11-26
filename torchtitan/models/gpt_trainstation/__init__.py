@@ -180,6 +180,7 @@ def _debugmodel(
     *,
     seq_len: int,
     initializer_range: float,
+    attention_multiplier: float | None,
 ) -> GptTrainstationModel.Config:
     dim = 256
     n_layers = 8
@@ -214,6 +215,7 @@ def _debugmodel(
             inner_attention=inner_attention,
             rope=rope,
             qk_norm=_norm(head_dim),
+            attention_multiplier=attention_multiplier,
         )
 
         if kind in (0, 3):
@@ -288,6 +290,7 @@ def model_registry(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     initializer_range: float = 0.02,
+    attention_multiplier: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     get_config, max_context_len = gpt_trainstation_configs[flavor]
@@ -303,6 +306,7 @@ def model_registry(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         seq_len=context_len,
         initializer_range=initializer_range,
+        attention_multiplier=attention_multiplier,
     )
     if converters is not None:
         validate_converter_compatibility(converters)

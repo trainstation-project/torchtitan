@@ -857,6 +857,10 @@ class GQAttention(BaseAttention):
         head_dim: int | None = None
         inner_attention: Module.Config
         rope: RoPE.Config | None
+        attention_multiplier: float | None = None
+        """Scale applied to ``q @ k^T`` before the softmax. ``None`` uses
+        ``1 / sqrt(head_dim)``; muP with a width-scaled head_dim uses
+        ``1 / head_dim``."""
 
         def __post_init__(self) -> None:
             BaseAttention.Config.__post_init__(self)
@@ -899,8 +903,14 @@ class GQAttention(BaseAttention):
             self.q_norm = config.qk_norm.build()
             self.k_norm = config.qk_norm.build()
 
-        # Scaling factor (needed when head_dim differs from dim // n_heads)
-        self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
+        # Scaling factor. None lets the inner attention default to
+        # 1 / sqrt(q.shape[-1]), which equals head_dim**-0.5.
+        if config.attention_multiplier is not None:
+            self.scaling = config.attention_multiplier
+        else:
+            self.scaling = (
+                self.head_dim**-0.5 if config.head_dim is not None else None
+            )
 
     def forward(
         self,

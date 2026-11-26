@@ -40,9 +40,16 @@ class _CausalAttention(nn.Module):
         return out_HTV.transpose(0, 1)
 
 
-def _debug_config(initializer_range: float = 0.02):
+def _debug_config(
+    initializer_range: float = 0.02, attention_multiplier: float | None = None
+):
     build_config, _ = gpt_trainstation_configs["debugmodel"]
-    return build_config("flex", seq_len=_SEQ_LEN, initializer_range=initializer_range)
+    return build_config(
+        "flex",
+        seq_len=_SEQ_LEN,
+        initializer_range=initializer_range,
+        attention_multiplier=attention_multiplier,
+    )
 
 
 def _build_for_cpu(config):
@@ -263,3 +270,24 @@ def test_mup_param_groups() -> None:
     model_spec.model.m_width = None
     with pytest.raises(ValueError, match="muP"):
         mup_adamw_optimizer(model_spec, lr=1.0)
+
+
+@pytest.mark.parametrize("attention_multiplier", [None, 1 / 64])
+def test_attention_multiplier_reaches_inner_attention(
+    attention_multiplier: float | None,
+) -> None:
+    """``attention_multiplier`` overrides the default ``1 / sqrt(head_dim)``."""
+    config = _debug_config(attention_multiplier=attention_multiplier)
+    model = _build_for_cpu(config)
+    expected = 64**-0.5 if attention_multiplier is None else attention_multiplier
+    seen = []
+    for layer in model.layers.values():
+        layer.attention.inner_attention.register_forward_hook(
+            lambda mod, args, kwargs, out: seen.append(kwargs["scale"]),
+            with_kwargs=True,
+        )
+    tokens = torch.randint(0, config.vocab_size, (_SEQ_LEN,))
+    AuxLoss.set_step_denominator(torch.tensor(float(_SEQ_LEN), dtype=torch.float64))
+    with torch.no_grad():
+        model(tokens, torch.arange(_SEQ_LEN), None)
+    assert seen == [expected] * len(config.layers)

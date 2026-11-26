@@ -216,6 +216,7 @@ def make_gqa_config(
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     qk_norm: RMSNorm.Config | None = None,
+    attention_multiplier: float | None = None,
     tp_gemm_backend: TpGemmBackend = "default",
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config.
@@ -274,6 +275,7 @@ def make_gqa_config(
         qk_norm=qk_norm,
         inner_attention=inner_attention,
         rope=rope,
+        attention_multiplier=attention_multiplier,
     )
 
 
