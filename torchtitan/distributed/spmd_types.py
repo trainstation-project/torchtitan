@@ -377,7 +377,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         # 3) If one side has no PartitionSpec, synthesize the simple
         # one-axis-per-dim form from its S(dim) local types.
         ndim = (
-            len(src.partition_spec)  # pyrefly: ignore [bad-argument-type]
+            len(src.partition_spec)
             if dst.partition_spec is None
             else len(dst.partition_spec)
         )

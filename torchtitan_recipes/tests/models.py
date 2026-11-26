@@ -296,8 +296,8 @@ def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
     return config
 
 
-# GptTrainstation mixes GQA/MLA attention with dense MLP and MoE (with and without
-# shared experts) in one model, so these layouts cover every layer type at once.
+# GptTrainstation mixes dense MLP and MoE (with and without
+# shared experts) in one model, so these layouts cover every FFN type at once.
 
 
 def gpt_trainstation_debugmodel_fsdp2_tp2_ep2_spmd_typecheck() -> Trainer.Config:

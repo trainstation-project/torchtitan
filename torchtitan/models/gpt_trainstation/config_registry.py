@@ -12,7 +12,6 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import (
-    default_adamw,
     LRSchedulersContainer,
     OptimizersContainer,
     ParamGroupConfig,
@@ -27,7 +26,6 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.deepseek_v3.model import Attention as MLAttention
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
@@ -53,7 +51,7 @@ def gpt_trainstation_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=mup_adamw_optimizer(model_spec, lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -86,6 +84,53 @@ def gpt_trainstation_debugmodel_varlen(
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     config.dataloader.max_num_documents = 64
     return config
+
+
+def mup_adamw_optimizer(
+    model_spec: ModelSpec,
+    *,
+    lr: float,
+    weight_decay: float = 0.1,
+) -> OptimizersContainer.Config:
+    """AdamW with muP param groups, matching lm-engine's ``param-groups/mup.yml``.
+
+    - Norm weights and biases: ``lr``, no weight decay.
+    - Token embedding and LM head: ``lr``.
+    - Everything else (hidden matrices): ``lr / m_width``.
+    """
+    model_config = cast(GptTrainstationModel.Config, model_spec.model)
+    if model_config.m_width is None:
+        raise ValueError("mup_adamw_optimizer requires a model built with muP.")
+
+    def adamw(group_lr: float, group_weight_decay: float) -> dict:
+        return {
+            "lr": group_lr,
+            "betas": (0.9, 0.95),
+            "eps": 1e-8,
+            "weight_decay": group_weight_decay,
+        }
+
+    return OptimizersContainer.Config(
+        param_groups=[
+            ParamGroupConfig(
+                pattern=r"(?:norm\.weight|\.bias)$",
+                optimizer_name="AdamW",
+                optimizer_kwargs=adamw(lr, 0.0),
+            ),
+            ParamGroupConfig(
+                pattern=r"(?:^|\.)(?:tok_embeddings|lm_head)\.weight$",
+                optimizer_name="AdamW",
+                optimizer_kwargs=adamw(lr, weight_decay),
+                # Middle pipeline stages hold neither.
+                allow_empty=True,
+            ),
+            ParamGroupConfig(
+                pattern=r".*",
+                optimizer_name="AdamW",
+                optimizer_kwargs=adamw(lr / model_config.m_width, weight_decay),
+            ),
+        ],
+    )
 
 
 def _routed_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
@@ -138,13 +183,8 @@ def dist_muon_optimizer(
     compute_sharding_by_fqn: dict[str, ComputeLayout] = {}
     for layer_id, layer in enumerate(model_config.layers):
         prefix = f"layers.{layer_id}"
-        attention = layer.attention
-        if isinstance(attention, MLAttention.Config):
-            projections = ["wkv_a", "wkv_b", "wo"]
-            projections += ["wq_a", "wq_b"] if attention.q_lora_rank else ["wq"]
-        else:
-            assert isinstance(attention, GQAttention.Config)
-            projections = ["qkv_linear.wqkv", "wo"]
+        assert isinstance(layer.attention, GQAttention.Config)
+        projections = ["qkv_linear.wqkv", "wo"]
         dense_fqns = [f"{prefix}.attention.{p}.weight" for p in projections]
 
         if layer.feed_forward is not None:

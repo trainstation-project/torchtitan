@@ -504,6 +504,27 @@ class TestParamGroupConfig(unittest.TestCase):
                 model, config.param_groups, impl_kwargs
             )
 
+    def test_allow_empty_skips_unmatched_group(self):
+        """A group with allow_empty=True that matches nothing is dropped."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"nonexistent_layer",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 1e-3},
+                    allow_empty=True,
+                ),
+                _DEFAULT_ADAMW,
+            ],
+        )
+        impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
+        groups_by_opt, patterns_by_opt = OptimizersContainer._build_param_groups(
+            model, config.param_groups, impl_kwargs
+        )
+        self.assertEqual(patterns_by_opt["AdamW"], [_DEFAULT_ADAMW.pattern])
+        self.assertEqual(len(groups_by_opt["AdamW"]), 1)
+
     def test_all_params_covered(self):
         """Every requires_grad param appears in exactly one group."""
         model = SimpleModel()

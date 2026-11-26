@@ -193,9 +193,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         Returns:
             Dictionary mapping individual expert keys to their DTensor or plain tensor weights
         """
-        # pyrefly: ignore [missing-attribute]
         device_mesh = grouped_expert_weight.device_mesh
-        # pyrefly: ignore [missing-attribute]
         dtensor_placements = grouped_expert_weight.placements
 
         # Step 1: Extract dimension-0 placement information

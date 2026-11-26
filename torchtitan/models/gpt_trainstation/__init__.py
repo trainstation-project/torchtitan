@@ -4,19 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""GptTrainstation: one decoder that mixes every shared layer type, for test coverage.
+"""GptTrainstation: one GQA decoder mixing dense MLP and MoE layers, for test coverage.
 
-The debug flavor repeats a four-layer pattern so that every pipeline stage of a
-2- or 4-stage split sees every layer type:
+Every layer uses GQA (CosSin RoPE, QK norm). The debug flavor repeats a
+four-layer FFN pattern so that every pipeline stage of a 2-stage split sees
+every FFN type:
 
-    layer % 4 == 0: GQA (CosSin RoPE, QK norm)   + dense MLP
-    layer % 4 == 1: MLA (no query LoRA)          + MoE, softmax router
-    layer % 4 == 2: GQA (CosSin RoPE, QK norm)   + MoE, grouped sigmoid router,
-                                                   shared experts, aux loss
-    layer % 4 == 3: MLA (query LoRA, YaRN RoPE)  + dense MLP
+    layer % 4 == 0: dense MLP
+    layer % 4 == 1: MoE, softmax router, routed experts only
+    layer % 4 == 2: MoE, sigmoid router, shared experts, aux loss
+    layer % 4 == 3: dense MLP
 """
 
+import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 
 import torch.nn as nn
@@ -28,7 +30,6 @@ from torchtitan.config.transform import (
 )
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
-    ComplexRoPE,
     CosSinRoPE,
     Embedding,
     Linear,
@@ -45,12 +46,8 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.deepseek_v3 import (
-    make_deepseek_v3_router_config,
-    make_mla_attention_config,
-)
 from torchtitan.models.qwen3.parallelize import parallelize_qwen3
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -58,34 +55,65 @@ from .model import GptTrainstationModel, GptTrainstationTransformerBlock
 
 __all__ = [
     "GptTrainstationModel",
+    "MuPConfig",
     "GptTrainstationTransformerBlock",
     "gpt_trainstation_configs",
     "model_registry",
 ]
 
 
-_LINEAR_INIT: dict[str, Callable] = {
-    "weight": partial(nn.init.trunc_normal_, std=0.02),
-    "bias": nn.init.zeros_,
-}
 _NORM_INIT = {"weight": nn.init.ones_}
-_EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=0.02)}
 _EPS = 1e-6
 
 
-def _depth_init(layer_id: int) -> dict[str, Callable]:
-    return {
-        "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "bias": nn.init.zeros_,
-    }
+@dataclass(kw_only=True, slots=True)
+class MuPConfig:
+    """muP multipliers, following lm-engine.
+
+    Token embeddings are scaled by ``m_emb``, each residual branch by
+    ``m_residual``, and logits by ``1 / m_width`` (``m_width = dim / base_dim``).
+    Hidden matrices init with std ``initializer_range / sqrt(m_width)`` and train at
+    ``lr / m_width`` (see ``config_registry.mup_adamw_optimizer``).
+    """
+
+    m_width: float
+    m_emb: float | None = None
+    m_residual: float | None = None
 
 
-def _experts_init(layer_id: int) -> dict[str, Callable]:
-    depth_init = partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id))
+# Arbitrary (untuned) values; the debug model only needs muP exercised.
+_DEBUG_MUP = MuPConfig(m_width=2.0, m_emb=12.0, m_residual=0.22)
+
+
+def _normal_init(std: float) -> dict[str, Callable]:
+    return {"weight": partial(nn.init.normal_, std=std), "bias": nn.init.zeros_}
+
+
+def _ffn(
+    *,
+    dim: int,
+    hidden_dim: int,
+    hidden_init: dict[str, Callable],
+    out_proj_init: dict[str, Callable],
+) -> FeedForward.Config:
+    # make_ffn_config ties the up (w3) init to w2; lm-engine inits up like gate.
+    ffn = make_ffn_config(
+        dim=dim,
+        hidden_dim=hidden_dim,
+        w1_param_init=hidden_init,
+        w2w3_param_init=hidden_init,
+    )
+    ffn.w2.param_init = out_proj_init
+    return ffn
+
+
+def _experts_init(
+    hidden_init: dict[str, Callable], out_proj_init: dict[str, Callable]
+) -> dict[str, Callable]:
     return {
-        "w1_EFD": _LINEAR_INIT["weight"],
-        "w2_EDF": depth_init,
-        "w3_EFD": depth_init,
+        "w1_EFD": hidden_init["weight"],
+        "w2_EDF": out_proj_init["weight"],
+        "w3_EFD": hidden_init["weight"],
     }
 
 
@@ -95,41 +123,30 @@ def _norm(dim: int) -> RMSNorm.Config:
 
 def _moe(
     *,
-    layer_id: int,
     dim: int,
     hidden_dim: int,
     num_experts: int,
     top_k: int,
-    deepseek_style: bool,
+    with_shared_experts: bool,
+    hidden_init: dict[str, Callable],
+    out_proj_init: dict[str, Callable],
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
 ) -> MoE.Config:
     """MoE in one of two styles.
 
-    ``deepseek_style=False``: softmax top-k router, routed experts only.
-    ``deepseek_style=True``: sigmoid router with node-limited (grouped)
-    routing, shared experts, and a sequence-wise auxiliary loss.
+    ``with_shared_experts=False``: softmax top-k router, routed experts only.
+    ``with_shared_experts=True``: sigmoid top-k router, shared experts, and a
+    microbatch-wise auxiliary load-balancing loss.
     """
-    if deepseek_style:
-        router = make_deepseek_v3_router_config(
-            dim=dim,
-            num_experts=num_experts,
-            gate_param_init=_depth_init(layer_id),
-            top_k=top_k,
-            score_func=Sigmoid.Config(),
-            route_norm=True,
-            num_expert_groups=2,
-            num_limited_groups=1,
-        )
-    else:
-        router = make_router_config(
-            dim=dim,
-            num_experts=num_experts,
-            gate_param_init=_LINEAR_INIT,
-            top_k=top_k,
-            score_func=Softmax.Config(),
-            route_norm=True,
-        )
+    router = make_router_config(
+        dim=dim,
+        num_experts=num_experts,
+        gate_param_init=hidden_init,
+        top_k=top_k,
+        score_func=Sigmoid.Config() if with_shared_experts else Softmax.Config(),
+        route_norm=True,
+    )
     return make_moe_config(
         num_experts=num_experts,
         router=router,
@@ -138,21 +155,21 @@ def _moe(
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             top_k=top_k,
-            param_init=_experts_init(layer_id),
+            param_init=_experts_init(hidden_init, out_proj_init),
             comm_backend=moe_comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
         shared_experts=(
-            make_ffn_config(
+            _ffn(
                 dim=dim,
                 hidden_dim=hidden_dim,
-                w1_param_init=_LINEAR_INIT,
-                w2w3_param_init=_depth_init(layer_id),
+                hidden_init=hidden_init,
+                out_proj_init=out_proj_init,
             )
-            if deepseek_style
+            if with_shared_experts
             else None
         ),
-        aux_loss_coeff=1e-3 if deepseek_style else None,
+        aux_loss_coeff=1e-3 if with_shared_experts else None,
     )
 
 
@@ -162,83 +179,61 @@ def _debugmodel(
     non_blocking_capacity_factor: float | None = None,
     *,
     seq_len: int,
+    initializer_range: float,
 ) -> GptTrainstationModel.Config:
     dim = 256
     n_layers = 8
     vocab_size = 2048
     n_heads = 16
-    gqa_head_dim = 64
-    mla_rope_dim = 32
+    head_dim = 64
     dense_hidden_dim = 768
     moe_hidden_dim = 256
     num_experts = 8
     top_k = 2
 
     inner_attention = get_attention_config(attn_backend)
-    gqa_rope = CosSinRoPE.Config(
-        dim=gqa_head_dim, max_context_length=seq_len, theta=1000000.0
-    )
-    mla_rope = ComplexRoPE.Config(
-        dim=mla_rope_dim,
-        max_context_length=seq_len,
-        theta=10000.0,
-        scaling="yarn",
-        rope_factor=40.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=4096,
-    )
+    rope = CosSinRoPE.Config(dim=head_dim, max_context_length=seq_len, theta=1000000.0)
+    # lm-engine "mup" init (plain normal, not truncated): the embedding and LM
+    # head use std initializer_range, hidden matrices initializer_range /
+    # sqrt(m_width), and output projections (attention wo, FFN and expert down
+    # projections) additionally divide by sqrt(2 * n_layers).
+    hidden_std = initializer_range / math.sqrt(_DEBUG_MUP.m_width)
+    hidden_init = _normal_init(hidden_std)
+    out_proj_init = _normal_init(hidden_std / math.sqrt(2 * n_layers))
 
     layers = []
     for layer_id in range(n_layers):
         kind = layer_id % 4
-        if kind in (0, 2):
-            attention = make_gqa_config(
-                dim=dim,
-                n_heads=n_heads,
-                n_kv_heads=8,
-                head_dim=gqa_head_dim,
-                wqkv_param_init=_LINEAR_INIT,
-                wo_param_init=_depth_init(layer_id),
-                inner_attention=inner_attention,
-                rope=gqa_rope,
-                qk_norm=_norm(gqa_head_dim),
-            )
-        else:
-            attention = make_mla_attention_config(
-                layer_id=layer_id,
-                dim=dim,
-                n_heads=n_heads,
-                q_lora_rank=0 if kind == 1 else 128,
-                kv_lora_rank=128,
-                qk_nope_head_dim=64,
-                qk_rope_head_dim=mla_rope_dim,
-                v_head_dim=64,
-                mscale=0.70,
-                attn_backend=attn_backend,
-                linear_init=_LINEAR_INIT,
-                norm_init=_NORM_INIT,
-                depth_init=_depth_init,
-                rope=mla_rope,
-            )
+        attention = make_gqa_config(
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=8,
+            head_dim=head_dim,
+            wqkv_param_init=hidden_init,
+            wo_param_init=out_proj_init,
+            inner_attention=inner_attention,
+            rope=rope,
+            qk_norm=_norm(head_dim),
+        )
 
         if kind in (0, 3):
-            feed_forward = make_ffn_config(
+            feed_forward = _ffn(
                 dim=dim,
                 hidden_dim=dense_hidden_dim,
-                w1_param_init=_LINEAR_INIT,
-                w2w3_param_init=_depth_init(layer_id),
+                hidden_init=hidden_init,
+                out_proj_init=out_proj_init,
             )
             moe = None
         else:
             feed_forward = None
             moe = _moe(
-                layer_id=layer_id,
                 dim=dim,
                 hidden_dim=moe_hidden_dim,
                 num_experts=num_experts,
                 top_k=top_k,
-                deepseek_style=kind == 2,
+                with_shared_experts=kind == 2,
+                hidden_init=hidden_init,
+                out_proj_init=out_proj_init,
                 moe_comm_backend=moe_comm_backend,
                 non_blocking_capacity_factor=non_blocking_capacity_factor,
             )
@@ -250,6 +245,7 @@ def _debugmodel(
                 ffn_norm=_norm(dim),
                 feed_forward=feed_forward,
                 moe=moe,
+                m_residual=_DEBUG_MUP.m_residual,
             )
         )
 
@@ -257,13 +253,19 @@ def _debugmodel(
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init={"weight": partial(nn.init.normal_, std=initializer_range)},
         ),
         norm=_norm(dim),
         lm_head=Linear.Config(
-            in_features=dim, out_features=vocab_size, param_init=_LINEAR_INIT
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_normal_init(initializer_range),
         ),
         layers=layers,
+        m_emb=_DEBUG_MUP.m_emb,
+        m_width=_DEBUG_MUP.m_width,
     )
 
 
@@ -285,6 +287,7 @@ def model_registry(
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
+    initializer_range: float = 0.02,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     get_config, max_context_len = gpt_trainstation_configs[flavor]
@@ -299,6 +302,7 @@ def model_registry(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         seq_len=context_len,
+        initializer_range=initializer_range,
     )
     if converters is not None:
         validate_converter_compatibility(converters)

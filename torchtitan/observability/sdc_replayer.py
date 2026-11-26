@@ -181,7 +181,6 @@ class _ReplayStateProvider:
         scalar_state: Mapping[str, ScalarStateAccessor],
     ) -> None:
         self._modules = tuple(dict.fromkeys(modules))
-        # pyrefly: ignore [read-only]
         self._device = device
         self._scalar_state = dict(scalar_state)
 
@@ -359,7 +358,6 @@ class SDCReplayer(Configurable):
     ) -> None:
         self.config = config
         self._modules = tuple(dict.fromkeys(modules))
-        # pyrefly: ignore [read-only]
         self._device = device
         self._scalar_state = dict(scalar_state or {})
         self._state_provider = _ReplayStateProvider(

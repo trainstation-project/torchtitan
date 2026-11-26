@@ -135,6 +135,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "optimizer.implementation",
         "optimizer.optimizer_factory_kwargs_by_name",
         "optimizer.param_groups",
+        "optimizer.param_groups.allow_empty",
         "optimizer.param_groups.optimizer_kwargs",
         "optimizer.param_groups.optimizer_name",
         "optimizer.param_groups.pattern",

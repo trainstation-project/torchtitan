@@ -297,7 +297,6 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         return cls(inner_tensors["_tensor"])
 
     @classmethod
-    # pyrefly: ignore [bad-param-name-override]
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
         del types
         template = None
@@ -518,7 +517,6 @@ class _UnshardedFSDPTensor(_FSDPTensorBase):
         )
 
     @classmethod
-    # pyrefly: ignore [bad-param-name-override]
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
         del types
         template = None

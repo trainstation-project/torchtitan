@@ -215,7 +215,7 @@ def extract_scalar_from_tensorboard(
 
     available_tags = event_acc.Tags().get("scalars", [])
 
-    if scalar_tag not in available_tags:  # pyrefly: ignore [not-iterable]
+    if scalar_tag not in available_tags:
         raise KeyError(
             f"Scalar tag '{scalar_tag}' not found in TensorBoard events. "
             f"Available tags: {available_tags}"

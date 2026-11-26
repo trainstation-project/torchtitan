@@ -284,7 +284,6 @@ def apply_fsdp_to_decoder(
         if getattr(transformer_block, "moe_enabled", False):
             assert hasattr(transformer_block, "moe")
             # Expert weights live on the grouped-GEMM child (inner_experts).
-            # pyrefly: ignore [missing-attribute]
             experts = transformer_block.moe.routed_experts.inner_experts
             expert_params = set(experts.parameters())
             num_experts = experts.num_experts

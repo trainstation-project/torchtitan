@@ -341,7 +341,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
-        # pyrefly: ignore [read-only]
         self.device = utils.get_local_device()
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
@@ -561,21 +560,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         lm_head is not None
                     ), "Last PP stage must have lm_head for ChunkedLossWrapper"
                     self.loss_fn.set_lm_head(
-                        lm_head  # pyrefly: ignore[bad-argument-type]
+                        lm_head
                     )
                     self.model_parts[
                         -1
-                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                    ]._skip_lm_head = True
             else:
                 assert len(self.model_parts) == 1
                 lm_head = self.model_parts[0].lm_head
                 assert (
                     lm_head is not None
                 ), "Model must have lm_head for ChunkedLossWrapper"
-                self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
+                self.loss_fn.set_lm_head(lm_head)
                 self.model_parts[
                     0
-                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                ]._skip_lm_head = True
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -782,10 +781,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         labels_mb.numel()  # pyrefly: ignore[missing-attribute]
                     )
                 if self.pp_has_first_stage:
-                    arg_mbs.append((inputs_mb,))  # pyrefly: ignore[bad-argument-type]
+                    arg_mbs.append((inputs_mb,))
                 kwarg_mbs.append(extra_kwargs_mb)
                 if target_mbs is not None:
-                    target_mbs.append(labels_mb)  # pyrefly: ignore[bad-argument-type]
+                    target_mbs.append(labels_mb)
 
             return self.fwd_bwd_fn(
                 arg_mbs if self.pp_has_first_stage else None,
@@ -828,7 +827,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 loss_kwargs["positions"] = extra_kwargs["positions"]
             loss, _ = self.loss_fn(
                 pred,
-                labels,  # pyrefly: ignore[bad-argument-type]
+                labels,
                 global_valid_tokens,
                 **loss_kwargs,
             )

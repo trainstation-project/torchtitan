@@ -68,7 +68,6 @@ def apply_compile(
 
     backend = _maybe_regional_inductor_backend(model, compile_config.backend)
 
-    # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block.compile(backend=backend, fullgraph=True)
 
